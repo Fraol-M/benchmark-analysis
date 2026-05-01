@@ -1,6 +1,6 @@
-# Benchmark Report — Demo vs PLN-RAG
+# Benchmark Report — NL → AtomSpace Extraction
 
-Generated: 2026-04-29 10:41:47
+Generated: 2026-05-01 16:07:11
 
 ---
 
@@ -8,33 +8,42 @@ Generated: 2026-04-29 10:41:47
 
 | Metric | mock |
 | --- | --- |
-| Total Cases | 2 |
-| Correct | 1/2 |
-| **Accuracy** | **50.0%** |
-| Avg Keyword Precision | 0.50 |
-| Avg Atom Count | 5.0 |
-| Cases with Rules | 1 |
-| Cases with Facts | 2 |
-| Avg Ingest Latency | 1.00s |
-| Avg Query Latency | 0.10s |
+| Total Cases | 3 |
+| Keyword Hits | 2/3 |
+| **Extraction Accuracy** | **66.7%** |
+| Avg Keyword Precision | 0.75 |
+| Avg Atom Count | 4.0 |
+| Avg Unique Heads | 2.5 |
+| Avg Rule Ratio | 0.25 |
+| Avg Atoms / Sentence | 2.00 |
+| Cases with Rules | 2 |
+| Cases with Facts | 3 |
+| Avg Ingest Latency | 1.20s |
 | Total Errors | 0 |
 
-## Accuracy by Category
+## Extraction Accuracy by Category
 
 | Category | mock |
 | --- | --- |
 | fact-extraction | 100% | 
-| single-hop-rule | 0% | 
+| paragraph | 50% | 
 
-## Accuracy by Reasoning Depth
+## Avg Atom Count by Category
+
+| Category | mock |
+| --- | --- |
+| fact-extraction | 3.0 | 
+| paragraph | 8.0 | 
+
+## Accuracy by Input Complexity (Hop Depth)
 
 | Hop Depth | mock |
 | --- | --- |
 | 0 | 100% | 
-| 1 | 0% | 
+| 1 | 50% | 
 
 ## Detailed Results — mock
 
-| Case | Category | Hops | Correct | Answer (truncated) | Atoms |
-| --- | --- | --- | --- | --- | --- |
-| test-1 | fact-extraction | 0 | ✅ | Sam is a frog | 3 |
+| Case | Category | Hops | ✓ | KW | Atoms | Heads | Rules | Latency |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| test-1 | fact-extraction | 0 | ✅ | 2/2 | 3 | 2 | 0 | 1.1s |

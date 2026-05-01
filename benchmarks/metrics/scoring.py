@@ -1,10 +1,10 @@
 """
-Scoring functions for benchmark comparison.
+Scoring functions for NL → AtomSpace extraction benchmarks.
 
-Three types of metrics:
-  1. Answer accuracy  — does the answer match the gold?
-  2. Extraction stats — atom count, predicate diversity, parse success rate
-  3. System metrics   — latency, errors
+Metrics:
+  1. Extraction accuracy  — do expected concept keywords appear in the atoms?
+  2. Extraction richness  — atom count, predicate diversity, rules vs facts
+  3. System metrics       — latency, errors
 """
 
 from __future__ import annotations
@@ -14,112 +14,135 @@ from dataclasses import dataclass, field
 from typing import List
 
 
-# ── Answer scoring ───────────────────────────────────────────────────────────
+# ── Extraction accuracy ──────────────────────────────────────────────────────
 
 
 @dataclass
-class AnswerScore:
-    """Score for a single QA case."""
+class ExtractionAccuracyScore:
+    """Accuracy score for a single case based purely on extracted atoms."""
     case_id: str
-    correct: bool
+    correct: bool           # at least one expected keyword found in atoms
     keyword_hits: int
     keyword_total: int
-    keyword_precision: float
-    answer: str
-    gold_answer: str
-    gold_keywords: List[str]
+    keyword_precision: float  # hits / total
+    matched_keywords: List[str]
+    missing_keywords: List[str]
+    atom_sample: List[str]  # atoms that contained a match
 
 
-def score_answer(
+def score_extraction_accuracy(
     case_id: str,
-    answer: str,
-    gold_answer: str,
-    gold_keywords: List[str],
-) -> AnswerScore:
+    atoms: List[str],
+    expected_keywords: List[str],
+) -> ExtractionAccuracyScore:
     """
-    Score an answer against gold using keyword overlap.
+    Check whether expected concept keywords appear anywhere in the atom strings.
 
-    A case is correct if at least one gold keyword appears in the answer.
-    Keyword precision = (matched keywords) / (total gold keywords).
+    A case is correct if at least one expected keyword is found.
+    Precision = matched / total expected keywords.
     """
-    if not answer:
-        return AnswerScore(
+    if not atoms:
+        return ExtractionAccuracyScore(
             case_id=case_id,
             correct=False,
             keyword_hits=0,
-            keyword_total=len(gold_keywords),
+            keyword_total=len(expected_keywords),
             keyword_precision=0.0,
-            answer="",
-            gold_answer=gold_answer,
-            gold_keywords=gold_keywords,
+            matched_keywords=[],
+            missing_keywords=list(expected_keywords),
+            atom_sample=[],
         )
 
-    answer_lower = answer.lower()
-    # Also check individual tokens for atom-style answers like "Sam"
-    answer_tokens = set(re.findall(r"[a-z0-9_-]+", answer_lower))
+    atoms_blob = " ".join(atoms).lower()
+    atom_tokens = set(re.findall(r"[a-z0-9_-]+", atoms_blob))
 
-    hits = 0
-    for keyword in gold_keywords:
-        kw = keyword.lower()
-        if kw in answer_lower or kw in answer_tokens:
-            hits += 1
+    matched: List[str] = []
+    missing: List[str] = []
+    hit_atoms: List[str] = []
 
-    return AnswerScore(
+    for kw in expected_keywords:
+        kw_lower = kw.lower()
+        found = kw_lower in atoms_blob or kw_lower in atom_tokens
+        if found:
+            matched.append(kw)
+            # collect up to 2 atoms that contain this keyword
+            for a in atoms:
+                if kw_lower in a.lower() and a not in hit_atoms:
+                    hit_atoms.append(a)
+                    break
+        else:
+            missing.append(kw)
+
+    total = len(expected_keywords)
+    hits = len(matched)
+
+    return ExtractionAccuracyScore(
         case_id=case_id,
         correct=hits > 0,
         keyword_hits=hits,
-        keyword_total=len(gold_keywords),
-        keyword_precision=hits / len(gold_keywords) if gold_keywords else 0.0,
-        answer=answer,
-        gold_answer=gold_answer,
-        gold_keywords=gold_keywords,
+        keyword_total=total,
+        keyword_precision=hits / total if total else 0.0,
+        matched_keywords=matched,
+        missing_keywords=missing,
+        atom_sample=hit_atoms[:5],
     )
 
 
-# ── Extraction scoring ──────────────────────────────────────────────────────
+# ── Extraction richness ──────────────────────────────────────────────────────
 
 
 @dataclass
 class ExtractionScore:
-    """Extraction-level metrics for a single case."""
+    """Structural richness metrics for a single case."""
     case_id: str
     atom_count: int
     unique_heads: int
     head_list: List[str]
     has_rules: bool
     has_facts: bool
+    rule_count: int = 0
+    fact_count: int = 0
+    rule_ratio: float = 0.0   # rules / total atoms
+    atoms_per_sentence: float = 0.0
     error: str | None = None
 
 
-def score_extraction(case_id: str, atoms: List[str]) -> ExtractionScore:
-    """Compute extraction metrics from a list of atom strings."""
-    heads = set()
-    has_rules = False
-    has_facts = False
+def score_extraction(
+    case_id: str,
+    atoms: List[str],
+    sentence_count: int = 1,
+) -> ExtractionScore:
+    """Compute structural richness metrics from a list of atom strings."""
+    heads: set[str] = set()
+    rule_count = 0
+    fact_count = 0
 
     for atom_str in atoms:
         atom_str = atom_str.strip()
         if not atom_str:
             continue
 
-        # Detect rules
         if atom_str.startswith("(=") or "Implication" in atom_str:
-            has_rules = True
+            rule_count += 1
         else:
-            has_facts = True
+            fact_count += 1
 
-        # Extract head symbol
         match = re.match(r"^\((\S+)", atom_str)
         if match:
             heads.add(match.group(1))
 
+    total = len(atoms)
     return ExtractionScore(
         case_id=case_id,
-        atom_count=len(atoms),
+        atom_count=total,
         unique_heads=len(heads),
         head_list=sorted(heads),
-        has_rules=has_rules,
-        has_facts=has_facts,
+        has_rules=rule_count > 0,
+        has_facts=fact_count > 0,
+        rule_count=rule_count,
+        fact_count=fact_count,
+        rule_ratio=rule_count / total if total else 0.0,
+        atoms_per_sentence=total / sentence_count if sentence_count else 0.0,
     )
 
 
@@ -135,57 +158,62 @@ class AggregateMetrics:
     accuracy: float = 0.0
     avg_keyword_precision: float = 0.0
     avg_atom_count: float = 0.0
+    avg_unique_heads: float = 0.0
+    avg_rule_ratio: float = 0.0
+    avg_atoms_per_sentence: float = 0.0
     avg_ingest_latency_s: float = 0.0
-    avg_query_latency_s: float = 0.0
     total_errors: int = 0
     cases_with_rules: int = 0
     cases_with_facts: int = 0
 
     # Per-category accuracy
     category_accuracy: dict = field(default_factory=dict)
+    # Per-category avg atom count
+    category_avg_atoms: dict = field(default_factory=dict)
     # Per-hop-depth accuracy
     hop_accuracy: dict = field(default_factory=dict)
 
 
 def compute_aggregate(
     backend: str,
-    answer_scores: List[AnswerScore],
+    accuracy_scores: List[ExtractionAccuracyScore],
     extraction_scores: List[ExtractionScore],
     ingest_latencies: List[float],
-    query_latencies: List[float],
     errors: List[str | None],
     categories: List[str],
     hop_depths: List[int],
 ) -> AggregateMetrics:
     """Compute aggregate metrics from per-case scores."""
-    n = len(answer_scores)
+    n = len(accuracy_scores)
     if n == 0:
         return AggregateMetrics(backend=backend)
 
-    correct = sum(1 for s in answer_scores if s.correct)
-    avg_kp = sum(s.keyword_precision for s in answer_scores) / n
-    avg_atoms = sum(s.atom_count for s in extraction_scores) / n if extraction_scores else 0
-    avg_ingest = sum(ingest_latencies) / n if ingest_latencies else 0
-    avg_query = sum(query_latencies) / n if query_latencies else 0
+    correct = sum(1 for s in accuracy_scores if s.correct)
+    avg_kp = sum(s.keyword_precision for s in accuracy_scores) / n
+    avg_atoms = sum(s.atom_count for s in extraction_scores) / n if extraction_scores else 0.0
+    avg_heads = sum(s.unique_heads for s in extraction_scores) / n if extraction_scores else 0.0
+    avg_rule_ratio = sum(s.rule_ratio for s in extraction_scores) / n if extraction_scores else 0.0
+    avg_aps = sum(s.atoms_per_sentence for s in extraction_scores) / n if extraction_scores else 0.0
+    avg_ingest = sum(ingest_latencies) / n if ingest_latencies else 0.0
     total_errors = sum(1 for e in errors if e)
     rules_count = sum(1 for s in extraction_scores if s.has_rules)
     facts_count = sum(1 for s in extraction_scores if s.has_facts)
 
-    # Per-category accuracy
+    # Per-category accuracy + avg atoms
     cat_correct: dict[str, list[bool]] = {}
-    for score, cat in zip(answer_scores, categories):
-        cat_correct.setdefault(cat, []).append(score.correct)
-    category_accuracy = {
-        cat: sum(vals) / len(vals) for cat, vals in cat_correct.items()
-    }
+    cat_atoms: dict[str, list[int]] = {}
+    for acc, ext, cat in zip(accuracy_scores, extraction_scores, categories):
+        cat_correct.setdefault(cat, []).append(acc.correct)
+        cat_atoms.setdefault(cat, []).append(ext.atom_count)
+
+    category_accuracy = {cat: sum(v) / len(v) for cat, v in cat_correct.items()}
+    category_avg_atoms = {cat: sum(v) / len(v) for cat, v in cat_atoms.items()}
 
     # Per-hop accuracy
     hop_correct: dict[int, list[bool]] = {}
-    for score, hop in zip(answer_scores, hop_depths):
-        hop_correct.setdefault(hop, []).append(score.correct)
-    hop_accuracy = {
-        hop: sum(vals) / len(vals) for hop, vals in hop_correct.items()
-    }
+    for acc, hop in zip(accuracy_scores, hop_depths):
+        hop_correct.setdefault(hop, []).append(acc.correct)
+    hop_accuracy = {hop: sum(v) / len(v) for hop, v in hop_correct.items()}
 
     return AggregateMetrics(
         backend=backend,
@@ -194,11 +222,14 @@ def compute_aggregate(
         accuracy=correct / n,
         avg_keyword_precision=avg_kp,
         avg_atom_count=avg_atoms,
+        avg_unique_heads=avg_heads,
+        avg_rule_ratio=avg_rule_ratio,
+        avg_atoms_per_sentence=avg_aps,
         avg_ingest_latency_s=avg_ingest,
-        avg_query_latency_s=avg_query,
         total_errors=total_errors,
         cases_with_rules=rules_count,
         cases_with_facts=facts_count,
         category_accuracy=category_accuracy,
+        category_avg_atoms=category_avg_atoms,
         hop_accuracy=hop_accuracy,
     )

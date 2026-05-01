@@ -21,33 +21,23 @@ class IngestResult:
     error: str | None = None
 
 
-@dataclass
-class QueryResult:
-    """What a backend returns after answering a question."""
-    answer: str = ""
-    raw_atoms: List[str] = field(default_factory=list)
-    latency_s: float = 0.0
-    error: str | None = None
-
-
 @runtime_checkable
 class Backend(Protocol):
     """
     Pluggable interface for benchmark backends.
 
     Two implementations:
-      - DemoBackend  (langextract → MeTTa / Hyperon)
+      - DemoBackend   (langextract → MeTTa / Hyperon)
       - PLNRAGBackend (NL2PLN → PeTTaChainer)
+
+    Benchmarks measure NL → AtomSpace extraction quality only.
+    No query/reasoning step is performed.
     """
 
     name: str
 
     def ingest(self, texts: List[str]) -> IngestResult:
         """Parse texts into symbolic atoms and load them into the KB."""
-        ...
-
-    def query(self, question: str) -> QueryResult:
-        """Ask a question against the loaded KB."""
         ...
 
     def get_atoms(self) -> List[str]:
@@ -60,7 +50,7 @@ class Backend(Protocol):
 
 
 class TimedMixin:
-    """Utility to time a block and return elapsed seconds."""
+    """Utility to time a callable and return (result, elapsed_s, error)."""
 
     @staticmethod
     def _timed(fn, *args, **kwargs):

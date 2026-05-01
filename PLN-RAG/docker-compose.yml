@@ -4,13 +4,14 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini/gemini-2.5-flash}
       - PARSER=${PLNRAG_PARSER:-canonical_pln}
       - NL2PLN_MODULE_PATH=/app/data/simba_all.json
       - CANONICAL_PLN_NL2PLN_MODULE_PATH=/app/data/simba_canonical_pln.json
       - QDRANT_URL=http://qdrant:6333
-      # Note: Points to Ollama on your host machine
-      - OLLAMA_URL=http://host.docker.internal:11434/api/embeddings
+      - OLLAMA_URL=http://ollama:11434/api/embeddings
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-nomic-embed-text}
       - ATOMSPACE_PATH=/app/data/atomspace/kb.metta
       - FAISS_PATH=/app/data/faiss
       - QUERY_FALLBACK_ENABLED=${QUERY_FALLBACK_ENABLED:-true}
@@ -18,10 +19,11 @@ services:
       - pln_data:/app/data
       - ./data/simba_all.json:/app/data/simba_all.json
       - ./data/simba_canonical_pln.json:/app/data/simba_canonical_pln.json
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     depends_on:
-      - qdrant  # Simple dependency, no healthcheck needed
+      qdrant:
+        condition: service_started
+      ollama:
+        condition: service_healthy
     restart: unless-stopped
 
   qdrant:
@@ -32,6 +34,32 @@ services:
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
 
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # One-shot container that pulls the embedding model on first run
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["ollama", "pull", "nomic-embed-text"]
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    restart: "no"
+
 volumes:
   pln_data:
   qdrant_data:
+  ollama_data:

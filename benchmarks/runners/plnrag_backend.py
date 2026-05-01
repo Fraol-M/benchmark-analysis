@@ -1,142 +1,117 @@
 """
-PLN-RAG backend adapter for benchmarks.
+PLN-RAG backend adapter for benchmarks — HTTP client mode.
 
-Calls PLNRAGService in-process — no Docker needed.
-Requires PeTTaChainer, NL2PLN, Qdrant, and Ollama to be available.
+Talks to the PLN-RAG FastAPI service running in Docker.
+No local Python imports of PLN-RAG code required.
+
+Start the stack first:
+    docker compose up --build   (from PLN-RAG/)
+
+Then run benchmarks normally:
+    python benchmarks/compare.py --backend plnrag
 """
 
 from __future__ import annotations
 
-import os
-import sys
-import uuid
-from pathlib import Path
+import time
 from typing import List
 
-# Make PLN-RAG importable
-_PLNRAG_ROOT = Path(__file__).resolve().parents[1] / "PLN-RAG"
-if str(_PLNRAG_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PLNRAG_ROOT))
+try:
+    import httpx
+except ImportError:
+    raise ImportError("httpx is required: pip install httpx")
 
-from runners import IngestResult, QueryResult, TimedMixin
+from runners import IngestResult, TimedMixin
+
+# Default base URL — override with PLNRAG_URL env var if needed
+import os
+_BASE_URL = os.environ.get("PLNRAG_URL", "http://localhost:8000")
+_TIMEOUT = 120  # seconds — parsing + reasoning can be slow
 
 
 class PLNRAGBackend(TimedMixin):
     """
-    Benchmark adapter for PLN-RAG (NL2PLN → PeTTaChainer).
+    Benchmark adapter for PLN-RAG running as a Docker service.
 
-    Uses PLNRAGService in-process for both ingest and query.
-    Each benchmark case gets its own isolated Qdrant collection and
-    atomspace file so cases don't leak state.
+    Uses the /ingest, /reset, and /health HTTP endpoints.
+    Only measures NL → AtomSpace extraction quality.
     """
 
     name = "plnrag"
 
-    def __init__(self):
-        self._service = None
-        self._run_id = uuid.uuid4().hex[:8]
-        self._case_id: str = ""
-        self._atomspace_path: str = ""
-        self._collection: str = ""
+    def __init__(self, base_url: str = _BASE_URL):
+        self._base = base_url.rstrip("/")
+        self._client = httpx.Client(timeout=_TIMEOUT)
+        self._atoms: List[str] = []
+        self._wait_for_service()
 
-    def _init_service(self, case_id: str = "default"):
-        """Lazy-init with isolated storage per case."""
-        from config import get_settings
+    # ── lifecycle ────────────────────────────────────────────────────────────
 
-        self._case_id = case_id
-        self._collection = f"bench_{self._run_id}_{case_id}".replace("-", "_")
-        self._atomspace_path = f"data/atomspace/bench_{self._run_id}_{case_id}.metta"
+    def _wait_for_service(self, retries: int = 12, delay: float = 5.0) -> None:
+        """Block until the PLN-RAG API is reachable, or raise."""
+        for attempt in range(1, retries + 1):
+            try:
+                resp = self._client.get(f"{self._base}/health", timeout=5)
+                if resp.status_code == 200:
+                    info = resp.json()
+                    print(
+                        f"  [plnrag] API ready — parser={info.get('parser')} "
+                        f"atoms={info.get('atomspace_size', 0)}"
+                    )
+                    return
+            except Exception:
+                pass
+            print(f"  [plnrag] Waiting for API ({attempt}/{retries})…")
+            time.sleep(delay)
+        raise RuntimeError(
+            f"PLN-RAG API not reachable at {self._base}. "
+            "Make sure Docker is running: docker compose up --build  (from PLN-RAG/)"
+        )
 
-        # Override settings for isolation
-        os.environ["QDRANT_COLLECTION"] = self._collection
-        os.environ["ATOMSPACE_PATH"] = self._atomspace_path
-        os.environ["QUERY_FALLBACK_ENABLED"] = "true"
-        get_settings.cache_clear()
-
-        from parsers import get_parser
-        from core.service import PLNRAGService
-
-        parser = get_parser()
-        self._service = PLNRAGService(parser)
+    # ── Backend protocol ─────────────────────────────────────────────────────
 
     def ingest(self, texts: List[str]) -> IngestResult:
-        """Ingest texts into the PLN-RAG knowledge base."""
-        import asyncio
+        """POST /ingest and collect returned atoms."""
+        t0 = time.perf_counter()
+        try:
+            resp = self._client.post(
+                f"{self._base}/ingest",
+                json={"texts": texts},
+                timeout=_TIMEOUT,
+            )
+            resp.raise_for_status()
+        except Exception as exc:
+            return IngestResult(error=str(exc), latency_s=time.perf_counter() - t0)
 
-        if self._service is None:
-            self._init_service()
+        elapsed = time.perf_counter() - t0
+        data = resp.json()
 
-        async def _do_ingest():
-            return await self._service.ingest_batch(texts)
+        all_atoms: List[str] = []
+        for item in data.get("results", []):
+            all_atoms.extend(item.get("atoms", []))
 
-        result, elapsed, error = self._timed(asyncio.run, _do_ingest())
-
-        if error:
-            return IngestResult(error=error, latency_s=elapsed)
-
-        all_atoms = []
-        for item in result:
-            all_atoms.extend(item.atoms)
-
+        self._atoms = all_atoms
         return IngestResult(
             atoms=all_atoms,
             atom_count=len(all_atoms),
             latency_s=elapsed,
         )
 
-    def query(self, question: str) -> QueryResult:
-        """Ask a question against the PLN-RAG knowledge base."""
-        import asyncio
-
-        if self._service is None:
-            return QueryResult(
-                answer="No service initialized",
-                error="Must call ingest() first",
-            )
-
-        async def _do_query():
-            return await self._service.query(question)
-
-        result, elapsed, error = self._timed(asyncio.run, _do_query())
-
-        if error:
-            return QueryResult(
-                answer=f"Query failed: {error}",
-                error=error,
-                latency_s=elapsed,
-            )
-
-        return QueryResult(
-            answer=result.answer,
-            raw_atoms=[result.raw_proof] if result.raw_proof else [],
-            latency_s=elapsed,
-        )
-
     def get_atoms(self) -> List[str]:
-        """Read atoms from the atomspace file."""
-        if not os.path.exists(self._atomspace_path):
-            return []
-        with open(self._atomspace_path, "r") as f:
-            return [line.strip() for line in f if line.strip()]
+        return list(self._atoms)
 
     def reset(self) -> None:
-        """Clear this case's atomspace and Qdrant collection."""
-        if self._service:
-            try:
-                self._service.reset("all")
-            except Exception:
-                pass
-
-        # Clean up atomspace file
-        if self._atomspace_path and os.path.exists(self._atomspace_path):
-            try:
-                os.remove(self._atomspace_path)
-            except Exception:
-                pass
-
-        self._service = None
+        """DELETE /reset to clear atomspace + vector DB between cases."""
+        self._atoms = []
+        try:
+            self._client.delete(
+                f"{self._base}/reset",
+                json={"scope": "all"},
+                timeout=30,
+            )
+        except Exception as exc:
+            print(f"  [plnrag] reset warning: {exc}")
 
     def set_case_id(self, case_id: str) -> None:
-        """Set the case ID for isolated storage. Call before ingest()."""
+        """Called by the orchestrator before each case — just reset."""
         self.reset()
-        self._init_service(case_id)
