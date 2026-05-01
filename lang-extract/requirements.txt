@@ -1,0 +1,5 @@
+﻿hyperon>=0.2.0
+langextract>=1.0.0
+streamlit>=1.30
+pytest>=7.0
+beautifulsoup4>=4.12

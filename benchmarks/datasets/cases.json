@@ -1,0 +1,302 @@
+[
+  {
+    "id": "fish-smart-yesno",
+    "category": "single-hop-rule",
+    "hop_depth": 1,
+    "texts": ["People who eat fish are smart.", "Kebede eats fish."],
+    "question": "Is Kebede smart?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "smart"],
+    "notes": "Classic PLN-RAG simba case"
+  },
+  {
+    "id": "dog-animal-yesno",
+    "category": "inheritance",
+    "hop_depth": 1,
+    "texts": ["Dogs are animals.", "Fido is a dog."],
+    "question": "Is Fido an animal?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "animal"],
+    "notes": "Basic class membership via inheritance"
+  },
+  {
+    "id": "human-mortal-yesno",
+    "category": "single-hop-rule",
+    "hop_depth": 1,
+    "texts": ["Humans are mortal.", "Socrates is a human."],
+    "question": "Is Socrates mortal?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "mortal"],
+    "notes": "Classic syllogism"
+  },
+  {
+    "id": "coffee-awake-yesno",
+    "category": "single-hop-rule",
+    "hop_depth": 1,
+    "texts": ["People who drink coffee stay awake.", "Sara drinks coffee."],
+    "question": "Is Sara awake?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "awake"],
+    "notes": "Simba-style yes/no"
+  },
+  {
+    "id": "parent-caring-yesno",
+    "category": "single-hop-rule",
+    "hop_depth": 1,
+    "texts": ["Parents care for their children.", "Alemu is a parent."],
+    "question": "Does Alemu care for children?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "care"],
+    "notes": "Role-based rule"
+  },
+  {
+    "id": "teacher-educates-yesno",
+    "category": "single-hop-rule",
+    "hop_depth": 1,
+    "texts": ["Teachers educate students.", "Marta is a teacher."],
+    "question": "Does Marta educate students?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "educate"],
+    "notes": "Role-based rule"
+  },
+  {
+    "id": "doctor-heals-yesno",
+    "category": "single-hop-rule",
+    "hop_depth": 1,
+    "texts": ["Doctors heal patients.", "Meron is a doctor."],
+    "question": "Does Meron heal patients?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "heal"],
+    "notes": "Role-based rule"
+  },
+  {
+    "id": "frog-basic-facts",
+    "category": "fact-extraction",
+    "hop_depth": 0,
+    "texts": ["Sam is a frog.", "Sam croaks.", "Sam eats flies."],
+    "question": "What is Sam?",
+    "gold_answer": "Sam is a frog",
+    "gold_keywords": ["frog"],
+    "notes": "Direct fact lookup, no reasoning"
+  },
+  {
+    "id": "frog-green-rule",
+    "category": "multi-premise-rule",
+    "hop_depth": 1,
+    "texts": ["Sam is a frog.", "Sam croaks.", "Sam eats flies.", "Every frog that croaks and eats flies is green."],
+    "question": "Is Sam green?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "green"],
+    "notes": "3-premise conjunction rule"
+  },
+  {
+    "id": "negation-basic",
+    "category": "negation",
+    "hop_depth": 0,
+    "texts": ["Sam is a frog.", "Tom is a cat.", "Tom is not a frog."],
+    "question": "Is Tom a frog?",
+    "gold_answer": "No",
+    "gold_keywords": ["no", "not"],
+    "notes": "Explicit negation"
+  },
+  {
+    "id": "type-declaration",
+    "category": "fact-extraction",
+    "hop_depth": 0,
+    "texts": ["Sam is of type Amphibian.", "Tom is of type Feline."],
+    "question": "What type is Sam?",
+    "gold_answer": "Amphibian",
+    "gold_keywords": ["amphibian"],
+    "notes": "Type declaration lookup"
+  },
+  {
+    "id": "property-color",
+    "category": "fact-extraction",
+    "hop_depth": 0,
+    "texts": ["Tom is white.", "Sam has age 3."],
+    "question": "What color is Tom?",
+    "gold_answer": "white",
+    "gold_keywords": ["white"],
+    "notes": "Property value lookup"
+  },
+  {
+    "id": "inheritance-chain",
+    "category": "inheritance",
+    "hop_depth": 2,
+    "texts": ["A frog is a kind of animal.", "An animal is a kind of living thing."],
+    "question": "Is a frog a living thing?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "living"],
+    "notes": "2-hop inheritance chain"
+  },
+  {
+    "id": "student-expert-rule",
+    "category": "multi-variable-rule",
+    "hop_depth": 1,
+    "texts": ["Kebede is a student of Ayele.", "Ayele is an expert in quantum physics.", "A student of an expert knows the topic."],
+    "question": "Does Kebede know quantum physics?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "quantum", "physics", "know"],
+    "notes": "Multi-variable rule with shared bindings"
+  },
+  {
+    "id": "spatial-location",
+    "category": "multi-variable-rule",
+    "hop_depth": 1,
+    "texts": ["Kebede is at Rack-01.", "Rack-01 is inside Vault-07.", "A person at a spot inside an area is in that area."],
+    "question": "Is Kebede in Vault-07?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "vault"],
+    "notes": "Spatial reasoning with hyphenated IDs"
+  },
+  {
+    "id": "transitive-chain-2hop",
+    "category": "transitive-chain",
+    "hop_depth": 2,
+    "texts": ["Object-77 is fragile.", "Fragile items need a double wrap.", "Items that need a double wrap are in a padded box."],
+    "question": "Is Object-77 in a padded box?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "padded", "box"],
+    "notes": "2-hop transitive chain with hyphenated ID"
+  },
+  {
+    "id": "freezing-chain-3hop",
+    "category": "transitive-chain",
+    "hop_depth": 3,
+    "texts": ["Freezing means a substance is decreasing in heat.", "As heat decreases, temperature decreases.", "As temperature decreases, molecules move slower.", "Water is freezing."],
+    "question": "Do water molecules move slower?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "slower", "molecule"],
+    "notes": "3-hop definitional chain — hardest reasoning test"
+  },
+  {
+    "id": "smart-open-who",
+    "category": "open-question",
+    "hop_depth": 1,
+    "texts": ["People who eat fish are smart.", "Kebede eats fish.", "Sara eats vegetables."],
+    "question": "Who is smart?",
+    "gold_answer": "Kebede",
+    "gold_keywords": ["kebede"],
+    "notes": "Open question — should return Kebede, not Sara"
+  },
+  {
+    "id": "eat-open-what",
+    "category": "open-question",
+    "hop_depth": 0,
+    "texts": ["Kebede eats fish.", "Sara eats rice."],
+    "question": "What does Kebede eat?",
+    "gold_answer": "fish",
+    "gold_keywords": ["fish"],
+    "notes": "Open question — direct fact"
+  },
+  {
+    "id": "multiple-facts",
+    "category": "fact-extraction",
+    "hop_depth": 0,
+    "texts": ["Bob is a dog.", "Bob eats bones.", "Bob is friendly."],
+    "question": "What does Bob eat?",
+    "gold_answer": "bones",
+    "gold_keywords": ["bone", "bones"],
+    "notes": "Multiple facts about same entity"
+  },
+  {
+    "id": "partof-rule",
+    "category": "multi-premise-rule",
+    "hop_depth": 1,
+    "texts": ["An electric motor is a part of an electric fan.", "An electric fan is a kind of appliance.", "An electric motor converts energy.", "If a part converts energy and is part of a whole, the whole converts energy."],
+    "question": "Does an electric fan convert energy?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "convert", "energy"],
+    "notes": "Part-of + multi-premise rule"
+  },
+  {
+    "id": "paraphrase-eat-1",
+    "category": "paraphrase",
+    "hop_depth": 0,
+    "texts": ["Bob eats flies."],
+    "question": "Does Bob eat flies?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "eat", "flies"],
+    "notes": "Paraphrase set A — original phrasing"
+  },
+  {
+    "id": "paraphrase-eat-2",
+    "category": "paraphrase",
+    "hop_depth": 0,
+    "texts": ["Bob consumes flies."],
+    "question": "Does Bob eat flies?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "eat", "flies", "consume"],
+    "notes": "Paraphrase set A — synonym verb"
+  },
+  {
+    "id": "paraphrase-eat-3",
+    "category": "paraphrase",
+    "hop_depth": 0,
+    "texts": ["Flies are eaten by Bob."],
+    "question": "Does Bob eat flies?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "eat", "flies"],
+    "notes": "Paraphrase set A — passive voice"
+  },
+  {
+    "id": "paraphrase-class-1",
+    "category": "paraphrase",
+    "hop_depth": 0,
+    "texts": ["Cats are mammals."],
+    "question": "Are cats mammals?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "mammal"],
+    "notes": "Paraphrase set B — plural"
+  },
+  {
+    "id": "paraphrase-class-2",
+    "category": "paraphrase",
+    "hop_depth": 0,
+    "texts": ["A cat is a mammal."],
+    "question": "Are cats mammals?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "mammal"],
+    "notes": "Paraphrase set B — singular article"
+  },
+  {
+    "id": "paraphrase-class-3",
+    "category": "paraphrase",
+    "hop_depth": 0,
+    "texts": ["Every cat is a mammal."],
+    "question": "Are cats mammals?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "mammal"],
+    "notes": "Paraphrase set B — universal quantifier"
+  },
+  {
+    "id": "wings-fly-rule",
+    "category": "single-hop-rule",
+    "hop_depth": 1,
+    "texts": ["If an animal has wings it can fly.", "Eagles have wings.", "An eagle is an animal."],
+    "question": "Can an eagle fly?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "fly"],
+    "notes": "2-premise rule with inheritance"
+  },
+  {
+    "id": "programmer-solves",
+    "category": "single-hop-rule",
+    "hop_depth": 1,
+    "texts": ["Programmers solve problems.", "Bekele is a programmer."],
+    "question": "Does Bekele solve problems?",
+    "gold_answer": "Yes",
+    "gold_keywords": ["yes", "solve", "problem"],
+    "notes": "Simba-style role rule"
+  },
+  {
+    "id": "no-proof-negative",
+    "category": "negative",
+    "hop_depth": 0,
+    "texts": ["Dogs are animals.", "Fido is a dog."],
+    "question": "Is Fido a cat?",
+    "gold_answer": "No proof found",
+    "gold_keywords": ["no", "not", "unknown", "no proof"],
+    "notes": "Negative case — system should report no proof, not hallucinate yes"
+  }
+]

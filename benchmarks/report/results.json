@@ -1,0 +1,41 @@
+{
+  "results": {
+    "demo": [
+      {
+        "case_id": "fish-smart-yesno",
+        "category": "single-hop-rule",
+        "hop_depth": 1,
+        "ingest_error": "Gemini API error: 400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': 'API key expired. Please renew the API key.', 'status': 'INVALID_ARGUMENT', 'details': [{'@type': 'type.googleapis.com/google.rpc.ErrorInfo', 'reason': 'API_KEY_INVALID', 'domain': 'googleapis.com', 'metadata': {'service': 'generativelanguage.googleapis.com'}}, {'@type': 'type.googleapis.com/google.rpc.LocalizedMessage', 'locale': 'en-US', 'message': 'API key expired. Please renew the API key.'}]}}",
+        "ingest_latency_s": 8.149798099999316,
+        "atom_count": 0,
+        "atoms": [],
+        "query_error": null,
+        "query_latency_s": 0.0,
+        "answer": "",
+        "answer_score": null,
+        "extraction_score": null
+      }
+    ]
+  },
+  "aggregates": {
+    "demo": {
+      "backend": "demo",
+      "total_cases": 1,
+      "correct_count": 0,
+      "accuracy": 0.0,
+      "avg_keyword_precision": 0.0,
+      "avg_atom_count": 0.0,
+      "avg_ingest_latency_s": 8.149798099999316,
+      "avg_query_latency_s": 0.0,
+      "total_errors": 1,
+      "cases_with_rules": 0,
+      "cases_with_facts": 0,
+      "category_accuracy": {
+        "single-hop-rule": 0.0
+      },
+      "hop_accuracy": {
+        "1": 0.0
+      }
+    }
+  }
+}
