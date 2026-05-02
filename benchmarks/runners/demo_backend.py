@@ -12,8 +12,8 @@ import sys
 from pathlib import Path
 from typing import List
 
-# Make demo/src importable
-_DEMO_SRC = Path(__file__).resolve().parents[2] / "demo" / "src"
+# Make lang-extract/src importable
+_DEMO_SRC = Path(__file__).resolve().parents[2] / "lang-extract" / "src"
 if str(_DEMO_SRC) not in sys.path:
     sys.path.insert(0, str(_DEMO_SRC))
 

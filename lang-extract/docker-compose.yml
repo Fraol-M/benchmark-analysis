@@ -1,0 +1,37 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8501:8501"
+    environment:
+      - LANGEXTRACT_API_KEY=${LANGEXTRACT_API_KEY:-}
+      - LANGEXTRACT_MODEL_ID=${LANGEXTRACT_MODEL_ID:-gemini-2.5-flash}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - PETTA_REASONER_URL=http://petta-reasoner:8010
+    depends_on:
+      petta-reasoner:
+        condition: service_healthy
+    restart: unless-stopped
+
+  petta-reasoner:
+    build:
+      context: .
+      dockerfile: src/langextract_atomspace/petta_reasoner_service/Dockerfile
+    ports:
+      - "8010:8010"
+    environment:
+      - PETTA_ATOMSPACE_PATH=/app/data/atomspace/kb.metta
+    volumes:
+      - petta_reasoner_data:/app/data
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8010/health').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  petta_reasoner_data:

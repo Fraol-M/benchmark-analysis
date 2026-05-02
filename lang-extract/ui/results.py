@@ -8,6 +8,12 @@ from collections import Counter
 
 import streamlit as st
 
+from langextract_atomspace.reasoning import (
+    PeTTaClient,
+    PeTTaClientError,
+    prepare_pln_reasoning_payload,
+)
+
 
 def _pill(label: str, value: str, color: str = "#22d3ee") -> str:
     return (
@@ -238,3 +244,107 @@ def render_query_tab(result: dict) -> None:
                 st.info("No results.")
         except Exception as exc:
             st.error(f"Query failed: {exc}")
+
+
+def render_pln_reasoning_tab(result: dict) -> None:
+    payload = prepare_pln_reasoning_payload(result)
+    statements = payload["statements"]
+    rejected = payload["rejected"]
+    suggested_queries = payload["suggested_queries"]
+
+    st.markdown(
+        _pill("PLN statements", str(len(statements)), color="#38bdf8")
+        + _pill("Rejected", str(len(rejected)), color="#f87171"),
+        unsafe_allow_html=True,
+    )
+
+    if not statements:
+        st.info("No PLN-compatible statements could be translated from these atoms.")
+        if rejected:
+            with st.expander("Translation rejects", expanded=False):
+                st.json(rejected)
+        return
+
+    with st.expander("Translated PLN statements", expanded=False):
+        st.code("\n".join(statements), language="lisp")
+
+    if rejected:
+        with st.expander(f"Translation rejects ({len(rejected)})", expanded=False):
+            st.json(rejected)
+
+    client = PeTTaClient()
+    reset_before_load = st.checkbox(
+        "Reset PeTTa atomspace before loading",
+        value=True,
+        help="Keeps each extraction run isolated inside the PeTTaChainer service.",
+    )
+
+    col_health, col_load = st.columns([1, 2], gap="medium")
+    with col_health:
+        if st.button("Check service", use_container_width=True):
+            try:
+                health = client.health()
+                st.success("PeTTaChainer service is reachable.")
+                st.json(health)
+            except PeTTaClientError as exc:
+                st.error(str(exc))
+
+    with col_load:
+        if st.button("Load into PeTTaChainer", type="primary", use_container_width=True):
+            try:
+                load_result = client.load(statements, reset=reset_before_load)
+                st.session_state["pln_load_result"] = {
+                    "added": load_result.added,
+                    "rejected": load_result.rejected,
+                    "atomspace_size": load_result.atomspace_size,
+                }
+                st.success(
+                    f"Loaded {len(load_result.added)} statement(s); "
+                    f"atomspace size is {load_result.atomspace_size}."
+                )
+            except PeTTaClientError as exc:
+                st.error(str(exc))
+
+    if st.session_state.get("pln_load_result"):
+        with st.expander("Last load result", expanded=False):
+            st.json(st.session_state["pln_load_result"])
+
+    st.markdown("##### PLN query")
+    if suggested_queries and not st.session_state.get("pln_query_input"):
+        st.session_state["pln_query_input"] = suggested_queries[0]
+
+    if suggested_queries:
+        selected = st.selectbox(
+            "Suggested query",
+            [""] + suggested_queries,
+            format_func=lambda item: item or "Pick a translated query",
+        )
+        if selected:
+            st.session_state["pln_query_input"] = selected
+
+    query = st.text_area(
+        "PLN query",
+        height=110,
+        key="pln_query_input",
+        help="Example: (: $prf (Smart kebede) $tv)",
+    )
+
+    run_col, _ = st.columns([1, 5])
+    with run_col:
+        run = st.button("Run PLN query", type="primary", use_container_width=True)
+
+    if run:
+        if not query.strip():
+            st.warning("Query is empty.")
+            return
+        try:
+            query_result = client.query(query)
+            if query_result.has_proof:
+                st.success(f"Proof found ({len(query_result.proof_traces)} trace item(s)).")
+                with st.container(border=True):
+                    for trace in query_result.proof_traces:
+                        st.code(trace, language="lisp")
+            else:
+                st.info("No proof found.")
+        except PeTTaClientError as exc:
+            st.error(str(exc))

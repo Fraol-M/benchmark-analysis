@@ -28,6 +28,11 @@ _WORKSPACE = _BENCH_ROOT.parent
 sys.path.insert(0, str(_BENCH_ROOT))
 sys.path.insert(0, str(_WORKSPACE))
 
+# Make demo/src importable for DemoBackend regardless of working directory
+_DEMO_SRC = _WORKSPACE / "lang-extract" / "src"
+if str(_DEMO_SRC) not in sys.path:
+    sys.path.insert(0, str(_DEMO_SRC))
+
 from metrics.scoring import (
     ExtractionAccuracyScore,
     ExtractionScore,

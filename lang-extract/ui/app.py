@@ -2,10 +2,10 @@
 Streamlit UI for the LangExtract -> AtomSpace pipeline.
 
 Run with:
-    streamlit run demo/ui/app.py
+    streamlit run ui/app.py
 
 or:
-    python demo/run_ui.py
+    docker compose up --build
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from results import (
     render_atomspace_tab,
     render_raw_tab,
     render_query_tab,
+    render_pln_reasoning_tab,
 )
 from theme import inject_css, hero, section_header
 
@@ -330,8 +331,8 @@ if source.get("kind") == "url":
 st.divider()
 section_header("Results")
 
-tab_metta, tab_atoms, tab_raw, tab_query = st.tabs(
-    ["🧬 MeTTa code", "🌌 AtomSpace", "📦 Raw JSON", "🔍 Query REPL"]
+tab_metta, tab_atoms, tab_raw, tab_query, tab_pln = st.tabs(
+    ["🧬 MeTTa code", "🌌 AtomSpace", "📦 Raw JSON", "🔍 Query REPL", "PLN Reasoning"]
 )
 
 with tab_metta:
@@ -345,3 +346,6 @@ with tab_raw:
 
 with tab_query:
     render_query_tab(result)
+
+with tab_pln:
+    render_pln_reasoning_tab(result)

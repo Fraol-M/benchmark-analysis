@@ -23,6 +23,8 @@ def init_state() -> None:
     st.session_state.setdefault("last_extraction", None)
     st.session_state.setdefault("last_error", None)
     st.session_state.setdefault("query_input", "! (match &self (isa $who frog) $who)")
+    st.session_state.setdefault("pln_query_input", "")
+    st.session_state.setdefault("pln_load_result", None)
 
 
 def set_extraction(result_dict: dict) -> None:
