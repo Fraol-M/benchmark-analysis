@@ -1,0 +1,68 @@
+[
+  {
+    "id": "fish-smart-proof",
+    "category": "single-hop-rule",
+    "hop_depth": 1,
+    "texts": ["People who eat fish are smart.", "Kebede eats fish."],
+    "question": "Is Kebede smart?",
+    "pln_query": "(: $prf (Smart kebede) $tv)",
+    "expected_proof": true,
+    "expected_terms": ["Smart", "kebede"],
+    "notes": "One rule plus one fact should prove Smart(kebede)."
+  },
+  {
+    "id": "wings-fly-proof",
+    "category": "multi-premise-rule",
+    "hop_depth": 1,
+    "texts": ["If an animal has wings it can fly.", "Eagles have wings.", "An eagle is an animal."],
+    "question": "Can an eagle fly?",
+    "pln_query": "(: $prf (CanFly eagle) $tv)",
+    "expected_proof": true,
+    "expected_terms": ["CanFly", "eagle"],
+    "notes": "Two-premise rule requiring IsA(eagle, animal) and HasWings(eagle)."
+  },
+  {
+    "id": "frog-green-proof",
+    "category": "multi-premise-rule",
+    "hop_depth": 1,
+    "texts": ["Sam is a frog.", "Sam croaks.", "Sam eats flies.", "Every frog that croaks and eats flies is green."],
+    "question": "Is Sam green?",
+    "pln_query": "(: $prf (Has sam color green) $tv)",
+    "expected_proof": true,
+    "expected_terms": ["Has", "sam", "green"],
+    "notes": "Three-premise conjunction rule should derive a property fact."
+  },
+  {
+    "id": "wrap-chain-proof",
+    "category": "transitive-chain",
+    "hop_depth": 2,
+    "texts": ["Object-77 is fragile.", "Fragile items need a double wrap.", "Items that need a double wrap are in a padded box."],
+    "question": "Is Object-77 in a padded box?",
+    "pln_query": "(: $prf (InPaddedBox object_77) $tv)",
+    "expected_proof": true,
+    "expected_terms": ["InPaddedBox", "object_77"],
+    "notes": "Two chained rules should prove the padded-box conclusion."
+  },
+  {
+    "id": "freezing-chain-proof",
+    "category": "transitive-chain",
+    "hop_depth": 3,
+    "texts": ["Freezing means a substance is decreasing in heat.", "As heat decreases, temperature decreases.", "As temperature decreases, molecules move slower.", "Water is freezing."],
+    "question": "Do water molecules move slower?",
+    "pln_query": "(: $prf (MoleculesMoveSlower water) $tv)",
+    "expected_proof": true,
+    "expected_terms": ["MoleculesMoveSlower", "water"],
+    "notes": "Three-hop chain from freezing to slower molecular motion."
+  },
+  {
+    "id": "dog-fly-no-proof",
+    "category": "negative",
+    "hop_depth": 0,
+    "texts": ["Dogs are animals.", "Fido is a dog."],
+    "question": "Can Fido fly?",
+    "pln_query": "(: $prf (CanFly fido) $tv)",
+    "expected_proof": false,
+    "expected_terms": [],
+    "notes": "No flying rule or wing fact exists, so no proof should be found."
+  }
+]

@@ -107,6 +107,59 @@ class ExtractionScore:
     error: str | None = None
 
 
+@dataclass
+class ReasoningScore:
+    """Proof/no-proof score for a single reasoning case."""
+    case_id: str
+    correct: bool
+    expected_proof: bool
+    has_proof: bool
+    term_hits: int
+    term_total: int
+    matched_terms: List[str]
+    missing_terms: List[str]
+    query_error: str | None = None
+
+
+def score_reasoning(
+    case_id: str,
+    proof_traces: List[str],
+    *,
+    expected_proof: bool,
+    expected_terms: List[str] | None = None,
+    query_error: str | None = None,
+) -> ReasoningScore:
+    """Score whether a reasoning query produced the expected proof status."""
+    expected_terms = expected_terms or []
+    has_proof = bool(proof_traces)
+    proof_blob = " ".join(proof_traces).lower()
+
+    matched: List[str] = []
+    missing: List[str] = []
+    for term in expected_terms:
+        if term.lower() in proof_blob:
+            matched.append(term)
+        else:
+            missing.append(term)
+
+    terms_ok = not expected_terms or len(matched) == len(expected_terms)
+    correct = query_error is None and has_proof == expected_proof and (
+        terms_ok if expected_proof else True
+    )
+
+    return ReasoningScore(
+        case_id=case_id,
+        correct=correct,
+        expected_proof=expected_proof,
+        has_proof=has_proof,
+        term_hits=len(matched),
+        term_total=len(expected_terms),
+        matched_terms=matched,
+        missing_terms=missing,
+        query_error=query_error,
+    )
+
+
 def score_extraction(
     case_id: str,
     atoms: List[str],
@@ -174,6 +227,23 @@ class AggregateMetrics:
     hop_accuracy: dict = field(default_factory=dict)
 
 
+@dataclass
+class ReasoningAggregateMetrics:
+    """Aggregate proof/no-proof metrics for one backend."""
+    backend: str
+    total_cases: int = 0
+    correct_count: int = 0
+    accuracy: float = 0.0
+    avg_query_latency_s: float = 0.0
+    total_errors: int = 0
+    expected_proof_cases: int = 0
+    expected_no_proof_cases: int = 0
+    false_negatives: int = 0
+    false_positives: int = 0
+    category_accuracy: dict = field(default_factory=dict)
+    hop_accuracy: dict = field(default_factory=dict)
+
+
 def compute_aggregate(
     backend: str,
     accuracy_scores: List[ExtractionAccuracyScore],
@@ -231,5 +301,60 @@ def compute_aggregate(
         cases_with_facts=facts_count,
         category_accuracy=category_accuracy,
         category_avg_atoms=category_avg_atoms,
+        hop_accuracy=hop_accuracy,
+    )
+
+
+def compute_reasoning_aggregate(
+    backend: str,
+    reasoning_scores: List[ReasoningScore],
+    query_latencies: List[float],
+    categories: List[str],
+    hop_depths: List[int],
+) -> ReasoningAggregateMetrics:
+    """Compute aggregate metrics from per-case reasoning scores."""
+    n = len(reasoning_scores)
+    if n == 0:
+        return ReasoningAggregateMetrics(backend=backend)
+
+    correct = sum(1 for score in reasoning_scores if score.correct)
+    errors = sum(1 for score in reasoning_scores if score.query_error)
+    expected_proof = sum(1 for score in reasoning_scores if score.expected_proof)
+    expected_no_proof = n - expected_proof
+    false_negatives = sum(
+        1
+        for score in reasoning_scores
+        if score.expected_proof and not score.has_proof and not score.query_error
+    )
+    false_positives = sum(
+        1
+        for score in reasoning_scores
+        if not score.expected_proof and score.has_proof and not score.query_error
+    )
+
+    cat_correct: dict[str, list[bool]] = {}
+    for score, cat in zip(reasoning_scores, categories):
+        cat_correct.setdefault(cat, []).append(score.correct)
+    category_accuracy = {
+        cat: sum(values) / len(values) for cat, values in cat_correct.items()
+    }
+
+    hop_correct: dict[int, list[bool]] = {}
+    for score, hop in zip(reasoning_scores, hop_depths):
+        hop_correct.setdefault(hop, []).append(score.correct)
+    hop_accuracy = {hop: sum(values) / len(values) for hop, values in hop_correct.items()}
+
+    return ReasoningAggregateMetrics(
+        backend=backend,
+        total_cases=n,
+        correct_count=correct,
+        accuracy=correct / n,
+        avg_query_latency_s=sum(query_latencies) / n if query_latencies else 0.0,
+        total_errors=errors,
+        expected_proof_cases=expected_proof,
+        expected_no_proof_cases=expected_no_proof,
+        false_negatives=false_negatives,
+        false_positives=false_positives,
+        category_accuracy=category_accuracy,
         hop_accuracy=hop_accuracy,
     )

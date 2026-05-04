@@ -24,7 +24,8 @@ class PLNRAGService:
     def __init__(self, parser: SemanticParser):
         cfg = get_settings()
         self._parser = parser
-        self._chunker = Chunker()
+        create_chunker = getattr(parser, "create_chunker", None)
+        self._chunker = create_chunker() if callable(create_chunker) else Chunker()
         self._reasoner = Reasoner()
         self._vector_store = VectorStore()
         self._answer_gen = AnswerGenerator()
@@ -73,7 +74,12 @@ class PLNRAGService:
 
                 # 5. Store in vector DB for future context retrieval
                 if added:
-                    self._vector_store.store(chunk, added, vector)
+                    self._vector_store.store(
+                        chunk,
+                        added,
+                        vector,
+                        metadata=parse_result.metadata,
+                    )
 
             return IngestItemResult(text=text, atoms=all_atoms, status="success")
 
@@ -251,6 +257,9 @@ class PLNRAGService:
     def reset(self, scope: str):
         if scope in ("all", "atomspace"):
             self._reasoner.reset()
+            reset_parser = getattr(self._parser, "reset", None)
+            if callable(reset_parser):
+                reset_parser()
         if scope in ("all", "vectordb"):
             self._vector_store.reset()
 

@@ -6,9 +6,11 @@ from compare import load_cases
 from metrics.scoring import (
     score_extraction_accuracy,
     score_extraction,
+    score_reasoning,
     AggregateMetrics,
+    ReasoningAggregateMetrics,
 )
-from compare import generate_report
+from compare import generate_report, generate_reasoning_report
 
 # 1. Load cases
 cases = load_cases()
@@ -95,5 +97,52 @@ mock_results = [
 report = generate_report({"mock": mock_results}, {"mock": mock_agg}, "report/smoke_test.md")
 assert "Extraction Accuracy" in report
 print(f"5. Report generation: {len(report)} chars: OK")
+
+# 6. Reasoning scoring
+r = score_reasoning(
+    "r1",
+    ["(Smart kebede)"],
+    expected_proof=True,
+    expected_terms=["Smart", "kebede"],
+)
+assert r.correct
+print(f"6. Reasoning scoring: proof={r.has_proof} terms={r.term_hits}/{r.term_total}: OK")
+
+# 7. Reasoning report generation
+mock_reasoning_agg = ReasoningAggregateMetrics(
+    backend="mock",
+    total_cases=2,
+    correct_count=1,
+    accuracy=0.5,
+    avg_query_latency_s=0.2,
+    total_errors=0,
+    expected_proof_cases=1,
+    expected_no_proof_cases=1,
+    false_negatives=1,
+    false_positives=0,
+    category_accuracy={"single-hop-rule": 1.0, "transitive-chain": 0.0},
+    hop_accuracy={1: 1.0, 2: 0.0},
+)
+mock_reasoning_results = [
+    {
+        "case_id": "reasoning-1",
+        "category": "single-hop-rule",
+        "hop_depth": 1,
+        "expected_proof": True,
+        "query_latency_s": 0.2,
+        "query_error": None,
+        "reasoning_score": {
+            "correct": True,
+            "has_proof": True,
+        },
+    }
+]
+reasoning_report = generate_reasoning_report(
+    {"mock": mock_reasoning_results},
+    {"mock": mock_reasoning_agg},
+    "report/smoke_reasoning.md",
+)
+assert "Reasoning" in reasoning_report
+print(f"7. Reasoning report generation: {len(reasoning_report)} chars: OK")
 
 print("\nAll smoke tests passed!")

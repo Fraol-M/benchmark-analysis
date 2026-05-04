@@ -1,12 +1,13 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List
+from typing import Any, List
 
 
 @dataclass
 class ParseResult:
     statements: List[str] = field(default_factory=list)
     queries: List[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class SemanticParser(ABC):

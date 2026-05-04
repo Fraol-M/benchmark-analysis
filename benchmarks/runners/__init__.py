@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable, List
+from typing import Any, Protocol, runtime_checkable, List
 
 
 @dataclass
@@ -19,6 +19,22 @@ class IngestResult:
     atom_count: int = 0
     latency_s: float = 0.0
     error: str | None = None
+
+
+@dataclass
+class QueryResult:
+    """What a backend returns after running a reasoning query."""
+    query: str = ""
+    proof_traces: List[str] = field(default_factory=list)
+    latency_s: float = 0.0
+    error: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+    translated_statement_count: int = 0
+    translation_rejected_count: int = 0
+
+    @property
+    def has_proof(self) -> bool:
+        return bool(self.proof_traces)
 
 
 @runtime_checkable

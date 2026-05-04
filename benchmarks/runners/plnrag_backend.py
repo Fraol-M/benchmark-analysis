@@ -21,7 +21,7 @@ try:
 except ImportError:
     raise ImportError("httpx is required: pip install httpx")
 
-from runners import IngestResult, TimedMixin
+from runners import IngestResult, QueryResult, TimedMixin
 
 # Default base URL — override with PLNRAG_URL env var if needed
 import os
@@ -99,6 +99,42 @@ class PLNRAGBackend(TimedMixin):
 
     def get_atoms(self) -> List[str]:
         return list(self._atoms)
+
+    def query(self, query_spec: dict | str) -> QueryResult:
+        """POST /query to PLN-RAG using the natural-language question."""
+        if isinstance(query_spec, dict):
+            question = query_spec.get("question") or query_spec.get("query") or ""
+        else:
+            question = query_spec
+
+        if not question.strip():
+            return QueryResult(error="missing question")
+
+        t0 = time.perf_counter()
+        try:
+            resp = self._client.post(
+                f"{self._base}/query",
+                json={"question": question},
+                timeout=_TIMEOUT,
+            )
+            resp.raise_for_status()
+        except Exception as exc:
+            return QueryResult(
+                query=question,
+                latency_s=time.perf_counter() - t0,
+                error=str(exc),
+            )
+
+        elapsed = time.perf_counter() - t0
+        data = resp.json()
+        raw_proof = str(data.get("raw_proof", ""))
+        proof_traces = [] if raw_proof in {"", "[]"} else [raw_proof]
+        return QueryResult(
+            query=data.get("executed_query") or data.get("pln_query") or question,
+            proof_traces=proof_traces,
+            latency_s=elapsed,
+            raw=data,
+        )
 
     def reset(self) -> None:
         """DELETE /reset to clear atomspace + vector DB between cases."""

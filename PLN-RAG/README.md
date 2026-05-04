@@ -103,11 +103,42 @@ CANONICAL_PLN_NL2PLN_MODULE_PATH=data/simba_canonical_pln.json
 # Use Manhin's parser (format self-correction + FAISS predicate store)
 PARSER=manhin
 PLNRAG_PARSER=manhin
+
+# Use LangExtract parser (NL -> LangExtract objects -> canonical PLN)
+PARSER=langextract
+PLNRAG_PARSER=langextract
+LANGEXTRACT_API_KEY=your-gemini-api-key-here
+LANGEXTRACT_MODEL_ID=gemini-2.5-flash
+LANGEXTRACT_EXAMPLES_PATH=data/langextract_examples.json
 ```
 
 `nl2pln` and `canonical_pln` intentionally use separate compiled artifacts so baseline
 comparisons stay clean. Tune `data/simba_canonical_pln.json` without modifying the
 baseline `simba_all.json`.
+
+The `langextract` parser follows a direct PLN-RAG path:
+
+```text
+Natural language
+-> LangExtract-style chunker
+-> LangExtract extraction objects
+-> source-aware canonical PLN statements/queries
+-> shared PLN postprocessor
+-> PeTTaChainer
+```
+
+It mirrors the useful parts of the standalone `lang-extract` project inside
+PLN-RAG: JSON-backed examples, paragraph/sentence-aware chunking, source-aware
+canonicalization, fuzzy/unsafe extraction rejection, predicate vocabulary reuse
+across chunks, source metadata for translated statements, and the same shared
+PLN postprocessor used by the canonical parser. It intentionally skips the
+Hyperon MeTTa runtime because the PLN-RAG reasoner consumes PeTTa-style PLN
+directly. Once LangExtract has produced PLN statements or queries, the existing
+reasoning phase is unchanged.
+
+The shared PLN postprocessor lives in `core/pln_postprocessor.py`. It performs
+the final reasoning-readiness pass for parser outputs: canonicalization,
+statement filtering, weak premise pruning, and query fallback/ranking.
 
 Query fallback execution can be toggled independently at runtime:
 

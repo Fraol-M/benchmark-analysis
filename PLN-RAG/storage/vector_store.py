@@ -1,7 +1,7 @@
 import json
 import uuid
 import httpx
-from typing import List, Tuple
+from typing import Any, List, Tuple
 from config import get_settings
 
 
@@ -43,14 +43,23 @@ class VectorStore:
                 ).raise_for_status()
         self._vector_size = vector_size
 
-    def store(self, sentence: str, atoms: List[str], vector: List[float]):
+    def store(
+        self,
+        sentence: str,
+        atoms: List[str],
+        vector: List[float],
+        metadata: dict[str, Any] | None = None,
+    ):
         self._ensure_collection(len(vector))
+        payload: dict[str, Any] = {"nl": sentence, "pln": atoms}
+        if metadata:
+            payload["metadata"] = metadata
         self._client.put(
             f"{self._qdrant}/collections/{self._collection}/points?wait=true",
             json={"points": [{
                 "id": str(uuid.uuid4()),
                 "vector": vector,
-                "payload": {"nl": sentence, "pln": atoms}
+                "payload": payload
             }]}
         ).raise_for_status()
 

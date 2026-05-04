@@ -21,10 +21,20 @@ class Settings(BaseSettings):
     gemini_api_key: Optional[str] = None
     gemini_model: str = "gemini/gemini-2.0-flash"
 
-    # Options: "nl2pln" | "canonical_pln" | "manhin"
+    # Options: "nl2pln" | "canonical_pln" | "manhin" | "langextract"
     parser: str = "canonical_pln"
     nl2pln_module_path: str = "data/simba_all.json"
     canonical_pln_nl2pln_module_path: str = "data/simba_canonical_pln.json"
+
+    # LangExtract parser (NL -> LangExtract objects -> canonical PLN)
+    langextract_api_key: Optional[str] = None
+    langextract_model_id: str = "gemini-2.5-flash"
+    langextract_model_url: Optional[str] = None
+    langextract_examples_path: str = "data/langextract_examples.json"
+    langextract_extraction_passes: int = 1
+    langextract_max_workers: int = 1
+    langextract_skip_fuzzy: bool = True
+    langextract_chunk_size: Optional[int] = None
 
     # Vector store
     qdrant_url: str = "http://localhost:6333"

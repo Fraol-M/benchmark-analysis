@@ -79,6 +79,10 @@ def _get_parser_factory(name: str):
         from parsers.canonical_pln_parser import CanonicalPLNParser
 
         return CanonicalPLNParser
+    if name == "langextract":
+        from parsers.langextract_pln_parser import LangExtractPLNParser
+
+        return LangExtractPLNParser
     raise ValueError(f"Unsupported parser '{name}'")
 
 
@@ -147,6 +151,7 @@ async def main() -> int:
         "canonical_pln_prev",
         "canonical_pln_fallback_off",
         "canonical_pln_fallback_on",
+        "langextract",
     ):
         parser_results = []
         for case in CASES:
