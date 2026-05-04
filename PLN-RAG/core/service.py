@@ -27,7 +27,7 @@ class PLNRAGService:
         create_chunker = getattr(parser, "create_chunker", None)
         self._chunker = create_chunker() if callable(create_chunker) else Chunker()
         self._reasoner = Reasoner()
-        self._vector_store = VectorStore()
+        self._vector_store = VectorStore() if cfg.use_vector_store else None
         self._answer_gen = AnswerGenerator()
         self._context_top_k = cfg.context_top_k
         self._query_fallback_enabled = cfg.query_fallback_enabled
@@ -55,9 +55,12 @@ class PLNRAGService:
 
             for chunk in chunks:
                 # 2. Retrieve context from atomspace + vector store
-                context, vector = self._vector_store.retrieve_context(
-                    chunk, top_k=self._context_top_k
-                )
+                if self._vector_store:
+                    context, vector = self._vector_store.retrieve_context(
+                        chunk, top_k=self._context_top_k
+                    )
+                else:
+                    context, vector = [], []
                 # Also supplement with recent atoms from disk
                 context = self._enrich_context(context)
 
@@ -73,7 +76,7 @@ class PLNRAGService:
                 all_atoms.extend(added)
 
                 # 5. Store in vector DB for future context retrieval
-                if added:
+                if added and self._vector_store:
                     self._vector_store.store(
                         chunk,
                         added,
@@ -118,9 +121,12 @@ class PLNRAGService:
 
     async def query(self, question: str) -> QueryResponse:
         # 1. Retrieve context for translation
-        context, _ = self._vector_store.retrieve_context(
-            question, top_k=self._context_top_k
-        )
+        if self._vector_store:
+            context, _ = self._vector_store.retrieve_context(
+                question, top_k=self._context_top_k
+            )
+        else:
+            context = []
         context = self._enrich_context(context)
 
         # 2. Parse question → PLN query
@@ -226,6 +232,8 @@ class PLNRAGService:
         their NL source sentences from the vector store.
         """
         atoms_to_search = set()
+        if not self._vector_store:
+            return []
         for trace in proof_traces:
             for match in re.findall(r"\([^()]+?\)", str(trace)):
                 if "STV" not in match and len(match) >= 5:
@@ -260,7 +268,7 @@ class PLNRAGService:
             reset_parser = getattr(self._parser, "reset", None)
             if callable(reset_parser):
                 reset_parser()
-        if scope in ("all", "vectordb"):
+        if scope in ("all", "vectordb") and self._vector_store:
             self._vector_store.reset()
 
     #  Health
@@ -268,6 +276,6 @@ class PLNRAGService:
     def health(self) -> dict:
         return {
             "atomspace_size": self._reasoner.size,
-            "vectordb_count": self._vector_store.count,
+            "vectordb_count": self._vector_store.count if self._vector_store else 0,
             "parser": self._parser.__class__.__name__,
         }

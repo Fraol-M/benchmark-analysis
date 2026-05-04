@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     qdrant_collection: str = "pln_rag"
     ollama_url: str = "http://localhost:11434/api/embeddings"
     ollama_model: str = "nomic-embed-text"
+    use_vector_store: bool = True
 
     # Atomspace persistence
     atomspace_path: str = "data/atomspace/kb.metta"

@@ -1,12 +1,17 @@
 services:
-  pln-rag:
-    build: .
+  pln-rag-pln:
+    image: pln-rag-pln:${PLNRAG_PLN_IMAGE_TAG:-latest}
+    build:
+      context: .
+      args:
+        REQUIREMENTS_FILE: ${PLNRAG_PLN_REQUIREMENTS_FILE:-requirements.pln.txt}
+    profiles: ["pln"]
     ports:
       - "8000:8000"
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini/gemini-2.5-flash}
-      - PARSER=${PLNRAG_PARSER:-canonical_pln}
+      - PARSER=${PLNRAG_PLN_PARSER:-canonical_pln}
       - NL2PLN_MODULE_PATH=/app/data/simba_all.json
       - CANONICAL_PLN_NL2PLN_MODULE_PATH=/app/data/simba_canonical_pln.json
       - LANGEXTRACT_API_KEY=${LANGEXTRACT_API_KEY:-}
@@ -35,8 +40,79 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  pln-rag-langextract:
+    image: pln-rag-langextract:${PLNRAG_LANGEXTRACT_IMAGE_TAG:-latest}
+    build:
+      context: .
+      args:
+        REQUIREMENTS_FILE: ${PLNRAG_LANGEXTRACT_REQUIREMENTS_FILE:-requirements.langextract.txt}
+    profiles: ["langextract"]
+    ports:
+      - "8001:8000"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini/gemini-2.5-flash}
+      - PARSER=langextract
+      - NL2PLN_MODULE_PATH=/app/data/simba_all.json
+      - CANONICAL_PLN_NL2PLN_MODULE_PATH=/app/data/simba_canonical_pln.json
+      - LANGEXTRACT_API_KEY=${LANGEXTRACT_API_KEY:-}
+      - LANGEXTRACT_MODEL_ID=${LANGEXTRACT_MODEL_ID:-gemini-2.5-flash}
+      - LANGEXTRACT_MODEL_URL=${LANGEXTRACT_MODEL_URL:-}
+      - LANGEXTRACT_EXAMPLES_PATH=/app/data/langextract_examples.json
+      - LANGEXTRACT_EXTRACTION_PASSES=${LANGEXTRACT_EXTRACTION_PASSES:-1}
+      - LANGEXTRACT_MAX_WORKERS=${LANGEXTRACT_MAX_WORKERS:-1}
+      - LANGEXTRACT_SKIP_FUZZY=${LANGEXTRACT_SKIP_FUZZY:-true}
+      - LANGEXTRACT_CHUNK_SIZE=${LANGEXTRACT_CHUNK_SIZE:-512}
+      - QDRANT_URL=http://qdrant:6333
+      - OLLAMA_URL=http://ollama:11434/api/embeddings
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-nomic-embed-text}
+      - ATOMSPACE_PATH=/app/data/atomspace/kb.metta
+      - FAISS_PATH=/app/data/faiss
+      - QUERY_FALLBACK_ENABLED=${QUERY_FALLBACK_ENABLED:-true}
+    volumes:
+      - pln_data:/app/data
+      - ./data/simba_all.json:/app/data/simba_all.json
+      - ./data/simba_canonical_pln.json:/app/data/simba_canonical_pln.json
+      - ./data/langextract_examples.json:/app/data/langextract_examples.json
+    depends_on:
+      qdrant:
+        condition: service_started
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+
+  pln-rag-langextract-light:
+    image: pln-rag-langextract-light:${PLNRAG_LANGEXTRACT_LIGHT_IMAGE_TAG:-latest}
+    build:
+      context: .
+      args:
+        REQUIREMENTS_FILE: ${PLNRAG_LANGEXTRACT_REQUIREMENTS_FILE:-requirements.langextract.txt}
+    profiles: ["langextract-light"]
+    ports:
+      - "8001:8000"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini/gemini-2.5-flash}
+      - PARSER=langextract
+      - LANGEXTRACT_API_KEY=${LANGEXTRACT_API_KEY:-}
+      - LANGEXTRACT_MODEL_ID=${LANGEXTRACT_MODEL_ID:-gemini-2.5-flash}
+      - LANGEXTRACT_MODEL_URL=${LANGEXTRACT_MODEL_URL:-}
+      - LANGEXTRACT_EXAMPLES_PATH=/app/data/langextract_examples.json
+      - LANGEXTRACT_EXTRACTION_PASSES=${LANGEXTRACT_EXTRACTION_PASSES:-1}
+      - LANGEXTRACT_MAX_WORKERS=${LANGEXTRACT_MAX_WORKERS:-1}
+      - LANGEXTRACT_SKIP_FUZZY=${LANGEXTRACT_SKIP_FUZZY:-true}
+      - LANGEXTRACT_CHUNK_SIZE=${LANGEXTRACT_CHUNK_SIZE:-512}
+      - ATOMSPACE_PATH=/app/data/atomspace/kb.metta
+      - QUERY_FALLBACK_ENABLED=${QUERY_FALLBACK_ENABLED:-true}
+      - USE_VECTOR_STORE=false
+    volumes:
+      - pln_data:/app/data
+      - ./data/langextract_examples.json:/app/data/langextract_examples.json
+    restart: unless-stopped
+
   qdrant:
     image: qdrant/qdrant:latest
+    profiles: ["pln", "langextract"]
     ports:
       - "6333:6333"
     volumes:
@@ -45,6 +121,7 @@ services:
 
   ollama:
     image: ollama/ollama:latest
+    profiles: ["pln", "langextract"]
     ports:
       - "11434:11434"
     volumes:
@@ -60,6 +137,7 @@ services:
   # One-shot container that pulls the embedding model on first run
   ollama-pull:
     image: ollama/ollama:latest
+    profiles: ["pln", "langextract"]
     depends_on:
       ollama:
         condition: service_healthy

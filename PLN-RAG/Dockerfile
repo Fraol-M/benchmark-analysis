@@ -3,6 +3,13 @@ FROM ubuntu:22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+RUN sed -i \
+    -e 's|http://archive.ubuntu.com/ubuntu|http://azure.archive.ubuntu.com/ubuntu|g' \
+    -e 's|http://security.ubuntu.com/ubuntu|http://azure.archive.ubuntu.com/ubuntu|g' \
+    /etc/apt/sources.list && \
+    printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::http::Pipeline-Depth "0";\n' \
+    > /etc/apt/apt.conf.d/80-retries
+
 RUN apt-get update && apt-get install -y \
     build-essential cmake ninja-build git \
     libssl-dev libgmp-dev libarchive-dev \
@@ -27,6 +34,13 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PETTA_COMMIT=e1490899cefc67c128d5311ff4861f9997674957
 ENV PETTACHAINER_COMMIT=d21b93b5132a7fc8722f64d57b74fb7c3a8d1faa
+
+RUN sed -i \
+    -e 's|http://archive.ubuntu.com/ubuntu|http://azure.archive.ubuntu.com/ubuntu|g' \
+    -e 's|http://security.ubuntu.com/ubuntu|http://azure.archive.ubuntu.com/ubuntu|g' \
+    /etc/apt/sources.list && \
+    printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::http::Pipeline-Depth "0";\n' \
+    > /etc/apt/apt.conf.d/80-retries
 
 RUN apt-get update && apt-get install -y \
     software-properties-common \
@@ -62,9 +76,10 @@ RUN cd /deps/PeTTaChainer && \
 
 # Install pln-rag app dependencies
 WORKDIR /app
-COPY requirements.txt .
+ARG REQUIREMENTS_FILE=requirements.txt
+COPY requirements*.txt ./
 RUN rm -rf /usr/lib/python3/dist-packages/blinker*
-RUN pip3 install --default-timeout=1000 -r requirements.txt
+RUN pip3 install --default-timeout=1000 -r ${REQUIREMENTS_FILE}
 
 COPY . .
 

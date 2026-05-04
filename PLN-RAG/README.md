@@ -16,7 +16,8 @@ Text → Chunker → SemanticParser → PeTTaChainer (atomspace + reasoning) →
 
 ## Prerequisites
 
-Ollama runs on your **host machine**, not inside Docker. Install it and pull the embedding model before starting the service:
+Ollama runs on your **host machine**, not inside Docker. Install it and pull the embedding model before starting the service.
+This is only required for the non-light profiles:
 
 ```bash
 # Install Ollama (Linux)
@@ -33,15 +34,24 @@ curl http://localhost:11434    # should return "Ollama is running"
 
 ```bash
 cp .env.example .env
-# Fill in OPENAI_API_KEY
+# Fill in OPENAI_API_KEY or GEMINI_API_KEY
 # OLLAMA_URL can stay as localhost in .env; docker-compose overrides it for containers
-# PLNRAG_PARSER controls the parser inside Docker Compose
 
-docker compose up --build
+# PLN/NL2PLN-based track (canonical_pln, nl2pln, manhin)
+docker compose --profile pln up --build
+
+# LangExtract track
+docker compose --profile langextract up --build
+
+# LangExtract light track (no Qdrant/Ollama)
+docker compose --profile langextract-light up --build
 ```
 
-The API will be available at http://localhost:8000.
-Interactive docs at http://localhost:8000/docs.
+The API will be available at http://localhost:8000 (PLN track)
+or http://localhost:8001 (LangExtract track).
+The light LangExtract track also uses http://localhost:8001 and must be run
+on its own.
+Interactive docs: http://localhost:8000/docs or http://localhost:8001/docs.
 
 > **Linux note:** `host.docker.internal` is not automatically available on Linux.
 > The `docker-compose.yml` already includes `extra_hosts: host.docker.internal:host-gateway`
@@ -86,27 +96,27 @@ curl http://localhost:8000/health
 
 ## Switching parsers
 
-Set `PARSER` in `.env` for local runs. For Docker Compose, use `PLNRAG_PARSER`
-to avoid accidental overrides from a shell-level `PARSER` variable.
+Set `PARSER` in `.env` for local runs. For Docker Compose, use the profile
+plus parser-specific env vars to avoid accidental overrides from a shell-level
+`PARSER` variable.
 
 ```bash
 # Use NL2PLN (DSPy-based, SIMBA/GEPA optimized)
 PARSER=nl2pln
-PLNRAG_PARSER=nl2pln
+PLNRAG_PLN_PARSER=nl2pln
 NL2PLN_MODULE_PATH=data/simba_all.json
 
 # Use CanonicalPLN parser (separate tuned SIMBA artifact)
 PARSER=canonical_pln
-PLNRAG_PARSER=canonical_pln
+PLNRAG_PLN_PARSER=canonical_pln
 CANONICAL_PLN_NL2PLN_MODULE_PATH=data/simba_canonical_pln.json
 
 # Use Manhin's parser (format self-correction + FAISS predicate store)
 PARSER=manhin
-PLNRAG_PARSER=manhin
+PLNRAG_PLN_PARSER=manhin
 
 # Use LangExtract parser (NL -> LangExtract objects -> canonical PLN)
 PARSER=langextract
-PLNRAG_PARSER=langextract
 LANGEXTRACT_API_KEY=your-gemini-api-key-here
 LANGEXTRACT_MODEL_ID=gemini-2.5-flash
 LANGEXTRACT_EXAMPLES_PATH=data/langextract_examples.json
