@@ -17,9 +17,7 @@ RUN apt-get update && apt-get install -y \
     python3 python3-pip python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get update && apt-get install -y software-properties-common && \
-    add-apt-repository ppa:swi-prolog/stable && \
-    apt-get update && apt-get install -y swi-prolog && \
+RUN apt-get update && apt-get install -y swi-prolog && \
     rm -rf /var/lib/apt/lists/*
 
 RUN git clone https://github.com/SWI-Prolog/packages-swipy /tmp/packages-swipy && \
@@ -43,13 +41,15 @@ RUN sed -i \
     > /etc/apt/apt.conf.d/80-retries
 
 RUN apt-get update && apt-get install -y \
-    software-properties-common \
     python3 python3-pip \
     libgmp10 libarchive13 libpcre2-8-0 libedit2 \
     git \
-    && add-apt-repository ppa:swi-prolog/stable \
-    && apt-get update && apt-get install -y swi-prolog \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/bin/swipl /usr/bin/swipl
+COPY --from=builder /usr/lib/swi-prolog /usr/lib/swi-prolog
+COPY --from=builder /usr/share/swi-prolog /usr/share/swi-prolog
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libswipl* /usr/lib/x86_64-linux-gnu/
 
 RUN python3 -m pip install --upgrade pip setuptools wheel
 
