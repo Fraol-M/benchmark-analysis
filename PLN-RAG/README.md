@@ -94,6 +94,24 @@ curl -X DELETE http://localhost:8000/reset \
 curl http://localhost:8000/health
 ```
 
+## Debug UI (Streamlit)
+
+Run the Streamlit app to inspect step-by-step outputs (LangExtract post-processed
+results, canonicalized PLN, PeTTaChainer atoms, and reasoning proof):
+
+```bash
+pip install -r requirements.common.txt
+streamlit run debug_ui/app.py
+```
+
+Set the API base URL in the UI to match your running profile:
+- LangExtract Docker profile: http://localhost:8001
+- PLN Docker profile: http://localhost:8000
+
+Debug endpoints used by the UI:
+- POST /debug/ingest
+- POST /debug/query
+
 ## Switching parsers
 
 Set `PARSER` in `.env` for local runs. For Docker Compose, use the profile

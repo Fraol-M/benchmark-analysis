@@ -118,6 +118,44 @@ class LangExtractPLNParser(SemanticParser):
             print(f"[LangExtractPLNParser] Failed for '{text}': {exc}")
             return ParseResult()
 
+    def debug_parse(self, text: str, context: list[str]) -> dict[str, Any]:
+        prompt = self._statement_prompt + format_context_hint(
+            context,
+            self._predicate_heads,
+        )
+        extractions = self._extract(text, prompt, self._statement_examples)
+        self._remember_predicates(collect_predicate_heads(extractions))
+
+        translated = translate_extractions_to_pln(
+            extractions,
+            source_text=text,
+            skip_fuzzy=self._skip_fuzzy,
+        )
+        processed = self._postprocessor.process(
+            text=text,
+            statements=translated.statements,
+            queries=[],
+            context=context,
+            plan_queries=False,
+        )
+
+        return {
+            "langextract_postprocessed": {
+                "statements": translated.statements,
+                "rejected": [
+                    {
+                        "extraction_class": item.extraction_class,
+                        "extraction_text": item.extraction_text,
+                        "reason": item.reason,
+                    }
+                    for item in translated.rejected
+                ],
+                "canonicalization_context": translated.ctx,
+                "statement_sources": translated.statement_to_source,
+            },
+            "pln_canonicalized": processed.statements,
+        }
+
     def parse_query(self, text: str, context: list[str]) -> ParseResult:
         try:
             prompt = self._query_prompt + format_context_hint(
@@ -160,6 +198,42 @@ class LangExtractPLNParser(SemanticParser):
         except Exception as exc:
             print(f"[LangExtractPLNParser] Query failed for '{text}': {exc}")
             return ParseResult()
+
+    def debug_parse_query(self, text: str, context: list[str]) -> dict[str, Any]:
+        prompt = self._query_prompt + format_context_hint(
+            context,
+            self._predicate_heads,
+        )
+        extractions = self._extract(text, prompt, self._query_examples)
+        translated = translate_query_extractions_to_pln(
+            extractions,
+            source_text=text,
+        )
+        processed = self._postprocessor.process(
+            text=text,
+            statements=translated.statements,
+            queries=translated.queries,
+            context=context,
+            plan_queries=True,
+        )
+
+        return {
+            "langextract_postprocessed": {
+                "queries": translated.queries,
+                "rejected": [
+                    {
+                        "extraction_class": item.extraction_class,
+                        "extraction_text": item.extraction_text,
+                        "reason": item.reason,
+                    }
+                    for item in translated.rejected
+                ],
+                "canonicalization_context": translated.ctx,
+                "query_sources": translated.query_to_source,
+            },
+            "pln_canonicalized": processed.queries,
+            "supporting_statements": processed.statements,
+        }
 
     def _extract(self, text: str, prompt: str, examples: list[Any]) -> list[Any]:
         import langextract as lx

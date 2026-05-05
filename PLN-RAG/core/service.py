@@ -9,7 +9,15 @@ from core.parser import SemanticParser
 from core.reasoner import Reasoner
 from core.answer_generator import AnswerGenerator
 from storage.vector_store import VectorStore
-from api.models import IngestItemResult, QueryResponse
+from api.models import (
+    IngestItemResult,
+    QueryResponse,
+    DebugIngestItemResult,
+    DebugIngestChunkResult,
+    LangExtractPostprocessed,
+    LangExtractQueryPostprocessed,
+    DebugQueryResponse,
+)
 
 
 class PLNRAGService:
@@ -43,6 +51,15 @@ class PLNRAGService:
         for text in texts:
             result = await asyncio.get_event_loop().run_in_executor(
                 None, self._ingest_single, text
+            )
+            results.append(result)
+        return results
+
+    async def debug_ingest_batch(self, texts: List[str]) -> List[DebugIngestItemResult]:
+        results = []
+        for text in texts:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, self._debug_ingest_single, text
             )
             results.append(result)
         return results
@@ -91,6 +108,64 @@ class PLNRAGService:
 
             traceback.print_exc()
             return IngestItemResult(text=text, status="failed", error=str(e))
+
+    def _debug_ingest_single(self, text: str) -> DebugIngestItemResult:
+        try:
+            chunks = self._chunker.chunk(text)
+            chunk_results: List[DebugIngestChunkResult] = []
+
+            for chunk in chunks:
+                if self._vector_store:
+                    context, vector = self._vector_store.retrieve_context(
+                        chunk, top_k=self._context_top_k
+                    )
+                else:
+                    context, vector = [], []
+                context = self._enrich_context(context)
+
+                debug_parse = getattr(self._parser, "debug_parse", None)
+                if callable(debug_parse):
+                    debug_info = debug_parse(chunk, context)
+                    langextract_info = debug_info.get("langextract_postprocessed", {})
+                    pln_canonicalized = debug_info.get("pln_canonicalized", [])
+                else:
+                    parse_result = self._parser.parse(chunk, context)
+                    langextract_info = {"statements": parse_result.statements}
+                    pln_canonicalized = parse_result.statements
+
+                added = self._reasoner.add_statements(pln_canonicalized)
+
+                if added and self._vector_store:
+                    self._vector_store.store(
+                        chunk,
+                        added,
+                        vector,
+                        metadata=langextract_info.get("statement_sources"),
+                    )
+
+                chunk_results.append(
+                    DebugIngestChunkResult(
+                        chunk=chunk,
+                        context=context,
+                        langextract_postprocessed=LangExtractPostprocessed(
+                            **langextract_info
+                        ),
+                        pln_canonicalized=pln_canonicalized,
+                        atomspace_added=added,
+                    )
+                )
+
+            return DebugIngestItemResult(
+                text=text,
+                chunks=chunk_results,
+                status="success",
+            )
+
+        except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            return DebugIngestItemResult(text=text, status="failed", error=str(e))
 
     def _enrich_context(self, rag_context: List[str], max_atoms: int = 50) -> List[str]:
         """
@@ -188,6 +263,92 @@ class PLNRAGService:
             fallback_used=fallback_used,
             query_status=query_status,
             raw_proof=raw_proof,
+            sources=sources,
+            answer=answer,
+        )
+
+    async def debug_query(self, question: str) -> DebugQueryResponse:
+        if self._vector_store:
+            context, _ = self._vector_store.retrieve_context(
+                question, top_k=self._context_top_k
+            )
+        else:
+            context = []
+        context = self._enrich_context(context)
+
+        debug_parse_query = getattr(self._parser, "debug_parse_query", None)
+        if callable(debug_parse_query):
+            debug_info = debug_parse_query(question, context)
+            langextract_info = debug_info.get("langextract_postprocessed", {})
+            pln_candidates = debug_info.get("pln_canonicalized", [])
+            supporting_statements = debug_info.get("supporting_statements", [])
+        else:
+            if hasattr(self._parser, "parse_query"):
+                parse_result = self._parser.parse_query(question, context)
+            else:
+                parse_result = self._parser.parse(question, context)
+            langextract_info = {"queries": parse_result.queries}
+            pln_candidates = parse_result.queries
+            supporting_statements = parse_result.statements
+
+        if supporting_statements:
+            self._reasoner.add_statements(supporting_statements)
+
+        original_query = pln_candidates[0] if pln_candidates else ""
+        if not pln_candidates:
+            return DebugQueryResponse(
+                question=question,
+                context=context,
+                langextract_postprocessed=LangExtractQueryPostprocessed(
+                    **langextract_info
+                ),
+                pln_canonicalized_queries=[],
+                supporting_statements=supporting_statements,
+                executed_query="",
+                fallback_used=False,
+                query_status="no_query",
+                proof="",
+                sources=[],
+                answer="I couldn't translate this question into a logical query.",
+            )
+
+        proof_traces: List[str] = []
+        executed_query = ""
+        candidates = (
+            pln_candidates if self._query_fallback_enabled else pln_candidates[:1]
+        )
+        for candidate in candidates:
+            executed_query = candidate
+            proof_traces = self._reasoner.query(candidate)
+            if proof_traces:
+                break
+
+        fallback_used = bool(
+            executed_query and original_query and executed_query != original_query
+        )
+        query_status = self._classify_query_status(
+            question, original_query, fallback_used
+        )
+        sources = self._extract_sources(proof_traces)
+        answer = self._answer_gen.generate(question, proof_traces)
+        if not proof_traces and query_status == "weakly_aligned":
+            answer = (
+                "No proof was found. The generated query is only weakly aligned with the current "
+                "knowledge base, so the failure may come from query shape mismatch or missing witness facts."
+            )
+
+        return DebugQueryResponse(
+            question=question,
+            context=context,
+            langextract_postprocessed=LangExtractQueryPostprocessed(
+                **langextract_info
+            ),
+            pln_canonicalized_queries=pln_candidates,
+            supporting_statements=supporting_statements,
+            executed_query=executed_query,
+            fallback_used=fallback_used,
+            query_status=query_status,
+            proof=str(proof_traces),
             sources=sources,
             answer=answer,
         )

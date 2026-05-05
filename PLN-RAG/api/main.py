@@ -7,6 +7,8 @@ from api.models import (
     QueryRequest, QueryResponse,
     ResetRequest, ResetResponse,
     HealthResponse,
+    DebugIngestRequest, DebugIngestResponse,
+    DebugQueryRequest, DebugQueryResponse,
 )
 from core.service import PLNRAGService
 from parsers import get_parser
@@ -94,3 +96,26 @@ async def health():
         vectordb_count=info["vectordb_count"],
         uptime_seconds=round(time.time() - _start_time, 1),
     )
+
+
+@app.post("/debug/ingest", response_model=DebugIngestResponse)
+async def debug_ingest(req: DebugIngestRequest):
+    """
+    Debug ingest path: returns step-by-step outputs per chunk
+    (LangExtract post-processed, canonicalized PLN, atoms added).
+    """
+    svc = get_service()
+    results = await svc.debug_ingest_batch(req.texts)
+    return DebugIngestResponse(
+        processed_count=len(results),
+        results=results,
+    )
+
+
+@app.post("/debug/query", response_model=DebugQueryResponse)
+async def debug_query(req: DebugQueryRequest):
+    """
+    Debug query path: returns parser outputs plus answer and proof.
+    """
+    svc = get_service()
+    return await svc.debug_query(req.question)
