@@ -2,6 +2,7 @@
 FROM ubuntu:22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV SWIPL_VERSION=V9.2.9
 
 RUN sed -i \
     -e 's|http://archive.ubuntu.com/ubuntu|http://azure.archive.ubuntu.com/ubuntu|g' \
@@ -10,15 +11,23 @@ RUN sed -i \
     printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::http::Pipeline-Depth "0";\n' \
     > /etc/apt/apt.conf.d/80-retries
 
-RUN apt-get update && apt-get install -y \
-    build-essential cmake ninja-build git \
-    libssl-dev libgmp-dev libarchive-dev \
-    libpcre2-dev libedit-dev libossp-uuid-dev \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake ninja-build git pkg-config ca-certificates \
+    libssl-dev libgmp-dev libarchive-dev zlib1g-dev \
+    libpcre2-dev libedit-dev libreadline-dev libossp-uuid-dev \
     python3 python3-pip python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get update && apt-get install -y swi-prolog && \
-    rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 --branch ${SWIPL_VERSION} \
+    https://github.com/SWI-Prolog/swipl-devel.git /tmp/swipl-devel && \
+    git -C /tmp/swipl-devel submodule update --init --depth 1 && \
+    cmake -S /tmp/swipl-devel -B /tmp/swipl-build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr && \
+    cmake --build /tmp/swipl-build && \
+    cmake --install /tmp/swipl-build && \
+    swipl --version && \
+    rm -rf /tmp/swipl-devel /tmp/swipl-build
 
 RUN git clone https://github.com/SWI-Prolog/packages-swipy /tmp/packages-swipy && \
     cd /tmp/packages-swipy && \
@@ -40,16 +49,16 @@ RUN sed -i \
     printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::http::Pipeline-Depth "0";\n' \
     > /etc/apt/apt.conf.d/80-retries
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip \
-    libgmp10 libarchive13 libpcre2-8-0 libedit2 \
+    libgmp10 libarchive13 libpcre2-8-0 libedit2 libreadline8 \
+    libossp-uuid16 libssl3 zlib1g \
     git \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/bin/swipl /usr/bin/swipl
-COPY --from=builder /usr/lib/swi-prolog /usr/lib/swi-prolog
-COPY --from=builder /usr/share/swi-prolog /usr/share/swi-prolog
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libswipl* /usr/lib/x86_64-linux-gnu/
+COPY --from=builder /usr/bin/swipl-ld /usr/bin/swipl-ld
+COPY --from=builder /usr/lib/swipl /usr/lib/swipl
 
 RUN python3 -m pip install --upgrade pip setuptools wheel
 
