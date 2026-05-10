@@ -6,6 +6,7 @@ from typing import List, Tuple
 from config import get_settings
 from core.chunker import Chunker
 from core.parser import SemanticParser
+from core.query_alignment import build_aligned_queries, extract_query_targets
 from core.reasoner import Reasoner
 from core.answer_generator import AnswerGenerator
 from storage.vector_store import VectorStore
@@ -39,6 +40,9 @@ class PLNRAGService:
         self._answer_gen = AnswerGenerator()
         self._context_top_k = cfg.context_top_k
         self._query_fallback_enabled = cfg.query_fallback_enabled
+        self._query_alignment_enabled = cfg.query_alignment_enabled
+        self._query_alignment_top_k = cfg.query_alignment_top_k
+        self._query_alignment_min_score = cfg.query_alignment_min_score
 
     #  Ingest
 
@@ -99,6 +103,7 @@ class PLNRAGService:
                         added,
                         vector,
                         metadata=parse_result.metadata,
+                        query_targets=extract_query_targets(added),
                     )
 
             return IngestItemResult(text=text, atoms=all_atoms, status="success")
@@ -141,6 +146,7 @@ class PLNRAGService:
                         added,
                         vector,
                         metadata=langextract_info.get("statement_sources"),
+                        query_targets=extract_query_targets(added),
                     )
 
                 chunk_results.append(
@@ -194,6 +200,62 @@ class PLNRAGService:
 
     #  Query
 
+    def _aligned_query_candidates(
+        self,
+        question: str,
+    ) -> tuple[List[str], List[dict]]:
+        if not self._vector_store or not self._query_alignment_enabled:
+            return [], []
+        matches, _ = self._vector_store.search(
+            question,
+            top_k=self._query_alignment_top_k,
+            min_score=self._query_alignment_min_score,
+        )
+        alignment = build_aligned_queries(question, matches)
+        return alignment.queries, alignment.matches
+
+    def _ordered_query_candidates(
+        self,
+        aligned_queries: List[str],
+        parser_queries: List[str],
+    ) -> List[tuple[str, str]]:
+        ordered: List[tuple[str, str]] = []
+        seen = set()
+        for source, queries in (
+            ("qdrant_alignment", aligned_queries),
+            ("parser", parser_queries),
+        ):
+            for query in queries:
+                if query in seen:
+                    continue
+                seen.add(query)
+                ordered.append((query, source))
+        return ordered
+
+    def _execute_query_candidates(
+        self,
+        candidates: List[tuple[str, str]],
+        original_query: str,
+    ) -> tuple[str, str, List[str]]:
+        first_success: tuple[str, str, List[str]] | None = None
+        last_candidate = ""
+        last_source = "none"
+
+        for candidate, source in candidates:
+            last_candidate = candidate
+            last_source = source
+            proof_traces = self._reasoner.query(candidate)
+            if not proof_traces:
+                continue
+            if first_success is None:
+                first_success = (candidate, source, proof_traces)
+            if original_query and candidate == original_query:
+                return candidate, source, proof_traces
+
+        if first_success is not None:
+            return first_success
+        return last_candidate, last_source, []
+
     async def query(self, question: str) -> QueryResponse:
         # 1. Retrieve context for translation
         if self._vector_store:
@@ -203,6 +265,7 @@ class PLNRAGService:
         else:
             context = []
         context = self._enrich_context(context)
+        aligned_queries, _qdrant_matches = self._aligned_query_candidates(question)
 
         # 2. Parse question → PLN query
         if hasattr(self._parser, "parse_query"):
@@ -210,13 +273,19 @@ class PLNRAGService:
         else:
             parse_result = self._parser.parse(question, context)
 
-        original_query = parse_result.queries[0] if parse_result.queries else ""
-        if not parse_result.queries:
+        original_query = (
+            parse_result.queries[0]
+            if parse_result.queries
+            else aligned_queries[0] if aligned_queries else ""
+        )
+        if not parse_result.queries and not aligned_queries:
             return QueryResponse(
                 question=question,
                 pln_query="",
                 original_query="",
                 executed_query="",
+                query_source="none",
+                alignment_used=False,
                 fallback_used=False,
                 query_status="no_query",
                 raw_proof="",
@@ -229,16 +298,14 @@ class PLNRAGService:
             self._reasoner.add_statements(parse_result.statements)
 
         # 4. Run reasoning via PeTTaChainer against ordered candidates
-        proof_traces: List[str] = []
-        executed_query = ""
-        candidates = (
+        parser_candidates = (
             parse_result.queries if self._query_fallback_enabled else parse_result.queries[:1]
         )
-        for candidate in candidates:
-            executed_query = candidate
-            proof_traces = self._reasoner.query(candidate)
-            if proof_traces:
-                break
+        candidates = self._ordered_query_candidates(aligned_queries, parser_candidates)
+        executed_query, executed_source, proof_traces = self._execute_query_candidates(
+            candidates,
+            original_query,
+        )
 
         raw_proof = str(proof_traces)
         fallback_used = bool(executed_query and original_query and executed_query != original_query)
@@ -260,6 +327,8 @@ class PLNRAGService:
             pln_query=executed_query,
             original_query=original_query,
             executed_query=executed_query,
+            query_source=executed_source,
+            alignment_used=executed_source == "qdrant_alignment",
             fallback_used=fallback_used,
             query_status=query_status,
             raw_proof=raw_proof,
@@ -275,6 +344,7 @@ class PLNRAGService:
         else:
             context = []
         context = self._enrich_context(context)
+        aligned_queries, qdrant_matches = self._aligned_query_candidates(question)
 
         debug_parse_query = getattr(self._parser, "debug_parse_query", None)
         if callable(debug_parse_query):
@@ -294,17 +364,24 @@ class PLNRAGService:
         if supporting_statements:
             self._reasoner.add_statements(supporting_statements)
 
-        original_query = pln_candidates[0] if pln_candidates else ""
-        if not pln_candidates:
+        original_query = (
+            pln_candidates[0]
+            if pln_candidates
+            else aligned_queries[0] if aligned_queries else ""
+        )
+        if not pln_candidates and not aligned_queries:
             return DebugQueryResponse(
                 question=question,
                 context=context,
+                qdrant_matches=qdrant_matches,
+                qdrant_aligned_queries=aligned_queries,
                 langextract_postprocessed=LangExtractQueryPostprocessed(
                     **langextract_info
                 ),
                 pln_canonicalized_queries=[],
                 supporting_statements=supporting_statements,
                 executed_query="",
+                query_source="none",
                 fallback_used=False,
                 query_status="no_query",
                 proof="",
@@ -312,16 +389,14 @@ class PLNRAGService:
                 answer="I couldn't translate this question into a logical query.",
             )
 
-        proof_traces: List[str] = []
-        executed_query = ""
-        candidates = (
+        parser_candidates = (
             pln_candidates if self._query_fallback_enabled else pln_candidates[:1]
         )
-        for candidate in candidates:
-            executed_query = candidate
-            proof_traces = self._reasoner.query(candidate)
-            if proof_traces:
-                break
+        candidates = self._ordered_query_candidates(aligned_queries, parser_candidates)
+        executed_query, executed_source, proof_traces = self._execute_query_candidates(
+            candidates,
+            original_query,
+        )
 
         fallback_used = bool(
             executed_query and original_query and executed_query != original_query
@@ -340,12 +415,15 @@ class PLNRAGService:
         return DebugQueryResponse(
             question=question,
             context=context,
+            qdrant_matches=qdrant_matches,
+            qdrant_aligned_queries=aligned_queries,
             langextract_postprocessed=LangExtractQueryPostprocessed(
                 **langextract_info
             ),
             pln_canonicalized_queries=pln_candidates,
             supporting_statements=supporting_statements,
             executed_query=executed_query,
+            query_source=executed_source,
             fallback_used=fallback_used,
             query_status=query_status,
             proof=str(proof_traces),

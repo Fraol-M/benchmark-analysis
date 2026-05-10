@@ -43,8 +43,6 @@ docker compose --profile pln up --build
 # LangExtract track
 docker compose --profile langextract up --build
 
-# LangExtract light track (no Qdrant/Ollama)
-docker compose --profile langextract-light up --build
 ```
 
 The API will be available at http://localhost:8000 (PLN track)

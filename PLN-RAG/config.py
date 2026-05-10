@@ -60,6 +60,9 @@ class Settings(BaseSettings):
 
     # Query execution
     query_fallback_enabled: bool = True
+    query_alignment_enabled: bool = True
+    query_alignment_top_k: int = 8
+    query_alignment_min_score: float = 0.55
 
     model_config = ConfigDict(
         env_file=_ENV_FILE,

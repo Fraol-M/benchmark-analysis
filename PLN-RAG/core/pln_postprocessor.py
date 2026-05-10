@@ -47,6 +47,35 @@ class PLNPostprocessor:
         "is_a": "IsA",
         "kind_of": "IsA",
         "type_of": "IsA",
+        "works_night_shift": "HasIrregularSleep",
+        "irregular_sleep": "HasIrregularSleep",
+        "has_irregular_sleep": "HasIrregularSleep",
+        "uses_two_factor_auth": "HasStrongAccountSecurity",
+        "two_factor_enabled": "HasStrongAccountSecurity",
+        "has_two_factor_auth": "HasStrongAccountSecurity",
+        "uses_protective_gear": "HasSafetyCompliance",
+        "safety_compliant": "HasSafetyCompliance",
+        "has_safety_compliance": "HasSafetyCompliance",
+        "located_at": "At",
+        "located_in": "In",
+        "inside_of": "Inside",
+        "part_of": "PartOf",
+        "member_of": "MemberOf",
+        "belongs_to": "BelongsTo",
+        "owns": "Owns",
+        "has_access": "CanAccess",
+        "can_access": "CanAccess",
+    }
+    GENERIC_SORTALS = {
+        "person",
+        "people",
+        "human",
+        "individual",
+        "someone",
+        "somebody",
+        "anyone",
+        "anybody",
+        "entity",
     }
     QUERY_MARKERS = {"who", "what", "when", "where", "why", "how", "which"}
 
@@ -78,6 +107,11 @@ class PLNPostprocessor:
         processed_statements = [
             self.prune_generic_sortal_premises(stmt) for stmt in processed_statements
         ]
+        
+        # Universal Identity Expansion
+        identity_statements = self.generate_universal_identity(processed_statements)
+        processed_statements.extend(identity_statements)
+
         processed_statements = self.filter_statements(processed_statements)
         if plan_queries:
             processed_queries = self.plan_queries(
@@ -118,7 +152,21 @@ class PLNPostprocessor:
         if word.endswith("s") and not word.endswith(("ss", "us", "is")):
             return word[:-1]
         return word
-
+    def generate_universal_identity(self, statements: List[str]) -> List[str]:
+        """
+        Extract all lowercase terms from statements and generate (IsA term term).
+        This helps logic reasoners unify self-identity constraints easily.
+        """
+        import re
+        terms = set()
+        for stmt in statements:
+            s_clean = stmt.replace("(", " ").replace(")", " ")
+            for token in s_clean.split():
+                if token.islower() and not re.match(r'^[0-9.]+$', token):
+                    if token not in {"and", "or", "not", "stv"}:
+                        terms.add(token)
+        
+        return [f"(IsA {t} {t})" for t in terms]
     def pluralize(self, word: str) -> str:
         if word.endswith("y") and len(word) > 2:
             return word[:-1] + "ies"
@@ -316,7 +364,9 @@ class PLNPostprocessor:
                 and len(parsed["args"]) == 2
                 and parsed["args"][0].startswith(("$", "?"))
             ):
-                continue
+                klass = parsed["args"][1].lower()
+                if klass in self.GENERIC_SORTALS:
+                    continue
             kept.append(premise)
 
         if len(kept) == len(premises) or not kept:

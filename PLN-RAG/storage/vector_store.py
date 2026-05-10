@@ -1,4 +1,3 @@
-import json
 import uuid
 import httpx
 from typing import Any, List, Tuple
@@ -49,9 +48,14 @@ class VectorStore:
         atoms: List[str],
         vector: List[float],
         metadata: dict[str, Any] | None = None,
+        query_targets: List[str] | None = None,
     ):
         self._ensure_collection(len(vector))
-        payload: dict[str, Any] = {"nl": sentence, "pln": atoms}
+        payload: dict[str, Any] = {
+            "nl": sentence,
+            "pln": atoms,
+            "query_targets": query_targets or [],
+        }
         if metadata:
             payload["metadata"] = metadata
         self._client.put(
@@ -63,11 +67,12 @@ class VectorStore:
             }]}
         ).raise_for_status()
 
-    def retrieve_context(self, text: str, top_k: int) -> Tuple[List[str], List[float]]:
-        """
-        Returns (context_atoms, embedding_vector).
-        context_atoms: flat list of PLN atom strings from top-k similar sentences.
-        """
+    def search(
+        self,
+        text: str,
+        top_k: int,
+        min_score: float | None = None,
+    ) -> Tuple[List[dict[str, Any]], List[float]]:
         vector = self.embed(text)
         self._ensure_collection(len(vector))
 
@@ -78,9 +83,33 @@ class VectorStore:
         if resp.status_code != 200:
             return [], vector
 
-        context: List[str] = []
+        matches: List[dict[str, Any]] = []
         for item in resp.json().get("result", []):
-            pln = item.get("payload", {}).get("pln", [])
+            score = item.get("score", 0)
+            if min_score is not None and score < min_score:
+                continue
+            payload = item.get("payload", {}) or {}
+            matches.append(
+                {
+                    "score": score,
+                    "nl": payload.get("nl", ""),
+                    "pln": payload.get("pln", []),
+                    "query_targets": payload.get("query_targets", []),
+                    "metadata": payload.get("metadata", {}),
+                }
+            )
+
+        return matches, vector
+
+    def retrieve_context(self, text: str, top_k: int) -> Tuple[List[str], List[float]]:
+        """
+        Returns (context_atoms, embedding_vector).
+        context_atoms: flat list of PLN atom strings from top-k similar sentences.
+        """
+        matches, vector = self.search(text, top_k=top_k)
+        context: List[str] = []
+        for item in matches:
+            pln = item.get("pln", [])
             if isinstance(pln, list):
                 context.extend(pln)
 

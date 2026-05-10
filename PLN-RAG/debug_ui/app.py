@@ -43,14 +43,24 @@ if st.button("Run debug ingest"):
                     for idx, chunk in enumerate(item.get("chunks", []), start=1):
                         st.subheader(f"Chunk {idx}")
                         st.code(chunk.get("chunk", ""))
-                        st.markdown("**Context**")
-                        st.json(chunk.get("context", []))
-                        st.markdown("**LangExtract post-processed**")
-                        st.json(chunk.get("langextract_postprocessed", {}))
-                        st.markdown("**PLN canonicalized statements**")
-                        st.json(chunk.get("pln_canonicalized", []))
-                        st.markdown("**PeTTaChainer atoms added**")
-                        st.json(chunk.get("atomspace_added", []))
+                        tabs = st.tabs([
+                            "LangExtract",
+                            "PLN",
+                            "PeTTaChainer",
+                            "Context",
+                        ])
+                        with tabs[0]:
+                            st.markdown("**Post-processed**")
+                            st.json(chunk.get("langextract_postprocessed", {}))
+                        with tabs[1]:
+                            st.markdown("**Canonicalized statements**")
+                            st.json(chunk.get("pln_canonicalized", []))
+                        with tabs[2]:
+                            st.markdown("**Atoms added**")
+                            st.json(chunk.get("atomspace_added", []))
+                        with tabs[3]:
+                            st.markdown("**Context**")
+                            st.json(chunk.get("context", []))
         except Exception as exc:
             st.error(f"Request failed: {exc}")
 
@@ -77,22 +87,32 @@ if st.button("Run debug query"):
             st.code(payload.get("proof", ""))
 
             st.subheader("Parser output")
-            st.markdown("**Context**")
-            st.json(payload.get("context", []))
-            st.markdown("**LangExtract post-processed**")
-            st.json(payload.get("langextract_postprocessed", {}))
-            st.markdown("**PLN canonicalized queries**")
-            st.json(payload.get("pln_canonicalized_queries", []))
-            st.markdown("**Supporting statements**")
-            st.json(payload.get("supporting_statements", []))
-            st.markdown("**Execution**")
-            st.json(
-                {
-                    "executed_query": payload.get("executed_query", ""),
-                    "fallback_used": payload.get("fallback_used", False),
-                    "query_status": payload.get("query_status", ""),
-                    "sources": payload.get("sources", []),
-                }
-            )
+            tabs = st.tabs([
+                "LangExtract",
+                "PLN",
+                "PeTTaChainer",
+                "Context",
+            ])
+            with tabs[0]:
+                st.markdown("**Post-processed**")
+                st.json(payload.get("langextract_postprocessed", {}))
+            with tabs[1]:
+                st.markdown("**Canonicalized queries**")
+                st.json(payload.get("pln_canonicalized_queries", []))
+                st.markdown("**Supporting statements**")
+                st.json(payload.get("supporting_statements", []))
+            with tabs[2]:
+                st.markdown("**Execution**")
+                st.json(
+                    {
+                        "executed_query": payload.get("executed_query", ""),
+                        "fallback_used": payload.get("fallback_used", False),
+                        "query_status": payload.get("query_status", ""),
+                        "sources": payload.get("sources", []),
+                    }
+                )
+            with tabs[3]:
+                st.markdown("**Context**")
+                st.json(payload.get("context", []))
         except Exception as exc:
             st.error(f"Request failed: {exc}")

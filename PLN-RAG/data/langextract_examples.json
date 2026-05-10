@@ -1,5 +1,5 @@
 {
-  "statement_prompt": "Extract semantic facts, type declarations, inheritance relationships, rules, and negations.\n\nThe output is not PLN text. Return LangExtract objects with these extraction classes:\n- fact: a predicate with one or more arguments. Attributes: predicate, plus either arguments or subject/object.\n- type_decl: declares that an entity belongs to a type. Attributes: entity, type.\n- property: assigns a property value to an entity. Attributes: entity, property, value.\n- inheritance: subtype or kind-of relationship. Attributes: child, parent.\n- rule: a conditional implication. Attributes: head_predicate, head_args, body.\n- negation: explicit negation of a unary or binary fact. Attributes: predicate, plus either arguments or subject/object.\n\nRules:\n- Use lowercase hyphen-separated predicate names, such as eats-fish or can-fly.\n- Entity and type names may preserve source casing.\n- Hyphens and digits inside source identifiers are preserved, such as Object-77 and Rack-01.\n- Variables in rules must start with $, such as $x.\n- rule.head_args must be a space-separated argument string.\n- rule.body must be a valid S-expression using the same predicate names.\n- Use (and ...) for multi-premise rule bodies.\n- Definitional sentences become rules with a single-atom body.\n- Emit each causal/transitive link as a separate rule.\n- Use exact source spans for extraction_text; do not paraphrase.",
+  "statement_prompt": "Extract semantic facts, type declarations, inheritance relationships, rules, and negations.\n\nThe output is not PLN text. Return LangExtract objects with these extraction classes:\n- fact: a predicate with one or more arguments. Attributes: predicate, plus either arguments or subject/object.\n- type_decl: declares that an entity belongs to a type. Attributes: entity, type.\n- property: assigns a property value to an entity. Attributes: entity, property, value.\n- inheritance: subtype or kind-of relationship. Attributes: child, parent.\n- rule: a conditional implication. Attributes: head_predicate, head_args, body.\n- negation: explicit negation of a unary or binary fact. Attributes: predicate, plus either arguments or subject/object.\n\nRules:\n- Use lowercase hyphen-separated predicate names, such as eats or can-fly.\n- Entity and type names may preserve source casing.\n- Hyphens and digits inside source identifiers are preserved, such as Object-77 and Rack-01.\n- Variables in rules must start with $, such as $x.\n- rule.head_args must be a space-separated argument string.\n- rule.body must be a valid S-expression using the same predicate names.\n- Use (and ...) for multi-premise rule bodies.\n- Definitional sentences become rules with a single-atom body.\n- Emit each causal/transitive link as a separate rule.\n- Use exact source spans for extraction_text; do not paraphrase.\n- For binary predicates (e.g., eats, consumes, owns, teaches), include both subject and object when the object is present in the text.\n- Do not bake objects into predicate names when an object is present; keep the object in subject/object or arguments.\n- If a sentence adds an adverb like \"frequently\", keep the object and encode the adverb in the predicate name only if needed (e.g., eats-frequently with subject+object).\n- Portion-size phrases (e.g., \"large portions\", \"small portions\") should become facts like eats-large-portions or eats-small-portions.\n- Portion-size facts can be unary when they describe the eater, unless the object is essential for clarity.\n- Ensure every dependent clause and comma-separated phrase (e.g., \", often in large portions,\") emits its own distinct fact. Do not skip details.",
   "query_prompt": "Extract one or more executable logical queries from the question.\n\nReturn LangExtract objects with extraction_class=query.\nAttributes:\n- predicate: lowercase hyphen-separated predicate name.\n- arguments: ordered argument list.\n\nRules:\n- Yes/no questions should use grounded arguments from the question.\n- Who/what/which questions should use variables such as $who, $what, or $x.\n- \"is a kind of\", \"is a\", and type/class questions should use predicate=isa.\n- Property questions may use predicate=has with arguments [entity, property, value].\n- Reuse predicate names from the provided context when possible.\n- Do not output PLN syntax directly.",
   "statement_examples": [
     {
@@ -21,6 +21,82 @@
             "subject": "Kebede",
             "predicate": "eats",
             "object": "fish"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Jordan eats rice almost every day, often in large portions, and chooses refined rice, not whole-grain rice.",
+      "extractions": [
+        {
+          "class": "fact",
+          "text": "Jordan eats rice almost every day",
+          "attributes": {
+            "subject": "Jordan",
+            "predicate": "eats-frequently",
+            "object": "rice"
+          }
+        },
+        {
+          "class": "fact",
+          "text": "often in large portions",
+          "attributes": {
+            "subject": "Jordan",
+            "predicate": "eats-large-portions"
+          }
+        },
+        {
+          "class": "fact",
+          "text": "refined rice",
+          "attributes": {
+            "subject": "rice",
+            "predicate": "is-refined"
+          }
+        },
+        {
+          "class": "negation",
+          "text": "not whole-grain rice",
+          "attributes": {
+            "subject": "rice",
+            "predicate": "is-whole-grain"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Nadia eats noodles every day, usually in large portions. The noodles are refined, not whole-grain noodles.",
+      "extractions": [
+        {
+          "class": "fact",
+          "text": "Nadia eats noodles every day",
+          "attributes": {
+            "subject": "Nadia",
+            "predicate": "eats-frequently",
+            "object": "noodles"
+          }
+        },
+        {
+          "class": "fact",
+          "text": "usually in large portions",
+          "attributes": {
+            "subject": "Nadia",
+            "predicate": "eats-large-portions"
+          }
+        },
+        {
+          "class": "fact",
+          "text": "The noodles are refined",
+          "attributes": {
+            "subject": "noodles",
+            "predicate": "is-refined"
+          }
+        },
+        {
+          "class": "negation",
+          "text": "not whole-grain noodles",
+          "attributes": {
+            "subject": "noodles",
+            "predicate": "is-whole-grain"
           }
         }
       ]
@@ -50,7 +126,8 @@
           "text": "Bob eats flies",
           "attributes": {
             "subject": "Bob",
-            "predicate": "eats-flies"
+            "predicate": "eats",
+            "object": "flies"
           }
         }
       ]
@@ -103,7 +180,7 @@
           "attributes": {
             "head_predicate": "has",
             "head_args": "$x color green",
-            "body": "(and (isa $x frog) (croaks $x) (eats-flies $x))"
+            "body": "(and (isa $x frog) (croaks $x) (eats $x flies))"
           }
         },
         {
@@ -113,6 +190,20 @@
             "head_predicate": "can-fly",
             "head_args": "$x",
             "body": "(and (isa $x animal) (has-wings $x))"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Drivers who regularly race sports cars experience high tire wear, especially if the tracks are rough and the car is heavy rather than lightweight.",
+      "extractions": [
+        {
+          "class": "rule",
+          "text": "Drivers who regularly race sports cars experience high tire wear, especially if the tracks are rough and the car is heavy rather than lightweight",
+          "attributes": {
+            "head_predicate": "experiences-high-tire-wear",
+            "head_args": "$x",
+            "body": "(and (races-regularly $x $c) (isa $c sports-car) (drives-on-rough-tracks $x) (is-heavy $c) (not (is-lightweight $c)))"
           }
         }
       ]
@@ -483,6 +574,267 @@
           }
         }
       ]
+    },
+    {
+      "text": "People who work night shifts have irregular sleep. Nuru works night shifts.",
+      "extractions": [
+        {
+          "class": "rule",
+          "text": "People who work night shifts have irregular sleep",
+          "attributes": {
+            "head_predicate": "has-irregular-sleep",
+            "head_args": "$x",
+            "body": "(works-night-shift $x)"
+          }
+        },
+        {
+          "class": "fact",
+          "text": "Nuru works night shifts",
+          "attributes": {
+            "subject": "Nuru",
+            "predicate": "works-night-shift"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Devices that run at high temperature without cooling require shutdown. Unit-12 runs at high temperature and does not have cooling.",
+      "extractions": [
+        {
+          "class": "rule",
+          "text": "Devices that run at high temperature without cooling require shutdown",
+          "attributes": {
+            "head_predicate": "requires-shutdown",
+            "head_args": "$d",
+            "body": "(and (runs-high-temperature $d) (not (has-cooling $d)))"
+          }
+        },
+        {
+          "class": "fact",
+          "text": "Unit-12 runs at high temperature",
+          "attributes": {
+            "subject": "Unit-12",
+            "predicate": "runs-high-temperature"
+          }
+        },
+        {
+          "class": "negation",
+          "text": "Unit-12 does not have cooling",
+          "attributes": {
+            "subject": "Unit-12",
+            "predicate": "has-cooling"
+          }
+        }
+      ]
+    },
+    {
+      "text": "People who enable two-factor authentication have strong account security. Mira enables two-factor authentication.",
+      "extractions": [
+        {
+          "class": "rule",
+          "text": "People who enable two-factor authentication have strong account security",
+          "attributes": {
+            "head_predicate": "has-strong-account-security",
+            "head_args": "$x",
+            "body": "(uses-two-factor-auth $x)"
+          }
+        },
+        {
+          "class": "fact",
+          "text": "Mira enables two-factor authentication",
+          "attributes": {
+            "subject": "Mira",
+            "predicate": "uses-two-factor-auth"
+          }
+        }
+      ]
+    },
+    {
+      "text": "If a person buys an item, they own the item. Asha buys a laptop.",
+      "extractions": [
+        {
+          "class": "rule",
+          "text": "If a person buys an item, they own the item",
+          "attributes": {
+            "head_predicate": "owns",
+            "head_args": "$x $item",
+            "body": "(buys $x $item)"
+          }
+        },
+        {
+          "class": "fact",
+          "text": "Asha buys a laptop",
+          "attributes": {
+            "subject": "Asha",
+            "predicate": "buys",
+            "object": "laptop"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Employees with active badges can access the lab. Eli is an employee. Eli has an active badge.",
+      "extractions": [
+        {
+          "class": "rule",
+          "text": "Employees with active badges can access the lab",
+          "attributes": {
+            "head_predicate": "can-access",
+            "head_args": "$x lab",
+            "body": "(and (isa $x employee) (has-active-badge $x))"
+          }
+        },
+        {
+          "class": "fact",
+          "text": "Eli is an employee",
+          "attributes": {
+            "subject": "Eli",
+            "predicate": "isa",
+            "object": "employee"
+          }
+        },
+        {
+          "class": "fact",
+          "text": "Eli has an active badge",
+          "attributes": {
+            "subject": "Eli",
+            "predicate": "has-active-badge"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Server-3 is in Rack-A. Rack-A is inside Data-Center-1. Anything in a rack inside a data center is in that data center.",
+      "extractions": [
+        {
+          "class": "fact",
+          "text": "Server-3 is in Rack-A",
+          "attributes": {
+            "subject": "Server-3",
+            "predicate": "in-rack",
+            "object": "Rack-A"
+          }
+        },
+        {
+          "class": "fact",
+          "text": "Rack-A is inside Data-Center-1",
+          "attributes": {
+            "subject": "Rack-A",
+            "predicate": "inside",
+            "object": "Data-Center-1"
+          }
+        },
+        {
+          "class": "rule",
+          "text": "Anything in a rack inside a data center is in that data center",
+          "attributes": {
+            "head_predicate": "in-data-center",
+            "head_args": "$s $dc",
+            "body": "(and (in-rack $s $r) (inside $r $dc))"
+          }
+        }
+      ]
+    },
+    {
+      "text": "If a meeting is rescheduled, participants are notified. The budget meeting was rescheduled.",
+      "extractions": [
+        {
+          "class": "rule",
+          "text": "If a meeting is rescheduled, participants are notified",
+          "attributes": {
+            "head_predicate": "participants-notified",
+            "head_args": "$m",
+            "body": "(rescheduled $m)"
+          }
+        },
+        {
+          "class": "fact",
+          "text": "The budget meeting was rescheduled",
+          "attributes": {
+            "subject": "budget meeting",
+            "predicate": "rescheduled"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Workers who use protective gear are safety compliant. Omar uses protective gear.",
+      "extractions": [
+        {
+          "class": "rule",
+          "text": "Workers who use protective gear are safety compliant",
+          "attributes": {
+            "head_predicate": "has-safety-compliance",
+            "head_args": "$x",
+            "body": "(uses-protective-gear $x)"
+          }
+        },
+        {
+          "class": "fact",
+          "text": "Omar uses protective gear",
+          "attributes": {
+            "subject": "Omar",
+            "predicate": "uses-protective-gear"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Accounts with overdue payments are suspended. Account-77 has overdue payments.",
+      "extractions": [
+        {
+          "class": "rule",
+          "text": "Accounts with overdue payments are suspended",
+          "attributes": {
+            "head_predicate": "suspended",
+            "head_args": "$acct",
+            "body": "(has-overdue-payments $acct)"
+          }
+        },
+        {
+          "class": "fact",
+          "text": "Account-77 has overdue payments",
+          "attributes": {
+            "subject": "Account-77",
+            "predicate": "has-overdue-payments"
+          }
+        }
+      ]
+    },
+    {
+      "text": "If stock drops below the reorder point, a reorder is required. Item-5 dropped below the reorder point.",
+      "extractions": [
+        {
+          "class": "rule",
+          "text": "If stock drops below the reorder point, a reorder is required",
+          "attributes": {
+            "head_predicate": "requires-reorder",
+            "head_args": "$item",
+            "body": "(below-reorder-point $item)"
+          }
+        },
+        {
+          "class": "fact",
+          "text": "Item-5 dropped below the reorder point",
+          "attributes": {
+            "subject": "Item-5",
+            "predicate": "below-reorder-point"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Camera-2 is not online.",
+      "extractions": [
+        {
+          "class": "negation",
+          "text": "Camera-2 is not online",
+          "attributes": {
+            "subject": "Camera-2",
+            "predicate": "online"
+          }
+        }
+      ]
     }
   ],
   "query_examples": [
@@ -527,6 +879,37 @@
             "arguments": [
               "Kebede",
               "$what"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "text": "Does Jordan eat rice?",
+      "extractions": [
+        {
+          "class": "query",
+          "text": "Does Jordan eat rice?",
+          "attributes": {
+            "predicate": "eats",
+            "arguments": [
+              "Jordan",
+              "rice"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "text": "Does Riley consume higher carbohydrates?",
+      "extractions": [
+        {
+          "class": "query",
+          "text": "Does Riley consume higher carbohydrates?",
+          "attributes": {
+            "predicate": "consumes-higher-carbohydrates",
+            "arguments": [
+              "Riley"
             ]
           }
         }
@@ -638,6 +1021,99 @@
             "arguments": [
               "Bekele",
               "problem"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "text": "Where is Server-3?",
+      "extractions": [
+        {
+          "class": "query",
+          "text": "Where is Server-3?",
+          "attributes": {
+            "predicate": "in-data-center",
+            "arguments": [
+              "Server-3",
+              "$where"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "text": "Who owns the laptop?",
+      "extractions": [
+        {
+          "class": "query",
+          "text": "Who owns the laptop?",
+          "attributes": {
+            "predicate": "owns",
+            "arguments": [
+              "$who",
+              "laptop"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "text": "Does Eli access the lab?",
+      "extractions": [
+        {
+          "class": "query",
+          "text": "Does Eli access the lab?",
+          "attributes": {
+            "predicate": "can-access",
+            "arguments": [
+              "Eli",
+              "lab"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "text": "Is Account-77 suspended?",
+      "extractions": [
+        {
+          "class": "query",
+          "text": "Is Account-77 suspended?",
+          "attributes": {
+            "predicate": "suspended",
+            "arguments": [
+              "Account-77"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "text": "Which item requires reorder?",
+      "extractions": [
+        {
+          "class": "query",
+          "text": "Which item requires reorder?",
+          "attributes": {
+            "predicate": "requires-reorder",
+            "arguments": [
+              "$which"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "text": "Is Camera-2 online?",
+      "extractions": [
+        {
+          "class": "query",
+          "text": "Is Camera-2 online?",
+          "attributes": {
+            "predicate": "online",
+            "arguments": [
+              "Camera-2"
             ]
           }
         }

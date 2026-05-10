@@ -28,6 +28,9 @@ services:
       - ATOMSPACE_PATH=/app/data/atomspace/kb.metta
       - FAISS_PATH=/app/data/faiss
       - QUERY_FALLBACK_ENABLED=${QUERY_FALLBACK_ENABLED:-true}
+      - QUERY_ALIGNMENT_ENABLED=${QUERY_ALIGNMENT_ENABLED:-true}
+      - QUERY_ALIGNMENT_TOP_K=${QUERY_ALIGNMENT_TOP_K:-8}
+      - QUERY_ALIGNMENT_MIN_SCORE=${QUERY_ALIGNMENT_MIN_SCORE:-0.55}
     volumes:
       - pln_data:/app/data
       - ./data/simba_all.json:/app/data/simba_all.json
@@ -69,6 +72,9 @@ services:
       - ATOMSPACE_PATH=/app/data/atomspace/kb.metta
       - FAISS_PATH=/app/data/faiss
       - QUERY_FALLBACK_ENABLED=${QUERY_FALLBACK_ENABLED:-true}
+      - QUERY_ALIGNMENT_ENABLED=${QUERY_ALIGNMENT_ENABLED:-true}
+      - QUERY_ALIGNMENT_TOP_K=${QUERY_ALIGNMENT_TOP_K:-8}
+      - QUERY_ALIGNMENT_MIN_SCORE=${QUERY_ALIGNMENT_MIN_SCORE:-0.55}
     volumes:
       - pln_data:/app/data
       - ./data/simba_all.json:/app/data/simba_all.json
@@ -104,6 +110,9 @@ services:
       - LANGEXTRACT_CHUNK_SIZE=${LANGEXTRACT_CHUNK_SIZE:-512}
       - ATOMSPACE_PATH=/app/data/atomspace/kb.metta
       - QUERY_FALLBACK_ENABLED=${QUERY_FALLBACK_ENABLED:-true}
+      - QUERY_ALIGNMENT_ENABLED=${QUERY_ALIGNMENT_ENABLED:-true}
+      - QUERY_ALIGNMENT_TOP_K=${QUERY_ALIGNMENT_TOP_K:-8}
+      - QUERY_ALIGNMENT_MIN_SCORE=${QUERY_ALIGNMENT_MIN_SCORE:-0.55}
       - USE_VECTOR_STORE=false
     volumes:
       - pln_data:/app/data

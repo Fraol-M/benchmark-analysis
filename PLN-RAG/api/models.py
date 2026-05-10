@@ -31,6 +31,8 @@ class QueryResponse(BaseModel):
     pln_query: str
     original_query: str
     executed_query: str
+    query_source: Literal["qdrant_alignment", "parser", "none"] = "none"
+    alignment_used: bool = False
     fallback_used: bool
     query_status: Literal["well_aligned", "weakly_aligned", "malformed", "no_query"]
     raw_proof: str
@@ -106,10 +108,13 @@ class DebugQueryRequest(BaseModel):
 class DebugQueryResponse(BaseModel):
     question: str
     context: List[str] = Field(default_factory=list)
+    qdrant_matches: List[Dict[str, Any]] = Field(default_factory=list)
+    qdrant_aligned_queries: List[str] = Field(default_factory=list)
     langextract_postprocessed: LangExtractQueryPostprocessed
     pln_canonicalized_queries: List[str] = Field(default_factory=list)
     supporting_statements: List[str] = Field(default_factory=list)
     executed_query: str
+    query_source: Literal["qdrant_alignment", "parser", "none"] = "none"
     fallback_used: bool
     query_status: Literal["well_aligned", "weakly_aligned", "malformed", "no_query"]
     proof: str
