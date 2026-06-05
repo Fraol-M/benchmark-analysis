@@ -1,12 +1,18 @@
 import asyncio
 import re
 import ast
+import time
 from typing import List, Tuple
 
 from config import get_settings
 from core.chunker import Chunker
-from core.parser import SemanticParser
-from core.query_alignment import build_aligned_queries, extract_query_targets
+from parsers.langextract_pln_parser import LangExtractPLNParser, ParseResult
+from core.query_alignment import (
+    build_aligned_queries,
+    extract_forward_seed_terms,
+    extract_query_targets,
+    filter_queries_by_question_intent,
+)
 from core.reasoner import Reasoner
 from core.answer_generator import AnswerGenerator
 from storage.vector_store import VectorStore
@@ -23,26 +29,19 @@ from api.models import (
 
 class PLNRAGService:
     """
-    Orchestrates the full pipeline:
-      Text → Chunker → Parser → Reasoner → AnswerGenerator
-
-    This class is the only place that knows about all components.
-    Each component only knows about its own interface.
+    Orchestrates the full LangExtract pipeline:
+      Text → Chunker → LangExtractPLNParser → Reasoner → AnswerGenerator
     """
 
-    def __init__(self, parser: SemanticParser):
+    def __init__(self, parser: LangExtractPLNParser):
         cfg = get_settings()
         self._parser = parser
-        create_chunker = getattr(parser, "create_chunker", None)
-        self._chunker = create_chunker() if callable(create_chunker) else Chunker()
+        self._chunker = parser.create_chunker()
         self._reasoner = Reasoner()
         self._vector_store = VectorStore() if cfg.use_vector_store else None
         self._answer_gen = AnswerGenerator()
         self._context_top_k = cfg.context_top_k
         self._query_fallback_enabled = cfg.query_fallback_enabled
-        self._query_alignment_enabled = cfg.query_alignment_enabled
-        self._query_alignment_top_k = cfg.query_alignment_top_k
-        self._query_alignment_min_score = cfg.query_alignment_min_score
 
     #  Ingest
 
@@ -128,15 +127,22 @@ class PLNRAGService:
                     context, vector = [], []
                 context = self._enrich_context(context)
 
-                debug_parse = getattr(self._parser, "debug_parse", None)
-                if callable(debug_parse):
-                    debug_info = debug_parse(chunk, context)
-                    langextract_info = debug_info.get("langextract_postprocessed", {})
-                    pln_canonicalized = debug_info.get("pln_canonicalized", [])
-                else:
-                    parse_result = self._parser.parse(chunk, context)
-                    langextract_info = {"statements": parse_result.statements}
-                    pln_canonicalized = parse_result.statements
+                debug_info = self._parser.debug_parse(chunk, context)
+                langextract_info = debug_info.get("langextract_postprocessed", {})
+                pln_canonicalized = debug_info.get("pln_canonicalized", [])
+                schema_alignment = debug_info.get("schema_alignment", [])
+                debug_metadata = {
+                    "statement_to_source": langextract_info.get(
+                        "statement_sources",
+                        {},
+                    ),
+                    "rejected": langextract_info.get("rejected", []),
+                    "canonicalization_context": langextract_info.get(
+                        "canonicalization_context",
+                        {},
+                    ),
+                    "schema_alignment": schema_alignment,
+                }
 
                 added = self._reasoner.add_statements(pln_canonicalized)
 
@@ -145,7 +151,7 @@ class PLNRAGService:
                         chunk,
                         added,
                         vector,
-                        metadata=langextract_info.get("statement_sources"),
+                        metadata=debug_metadata,
                         query_targets=extract_query_targets(added),
                     )
 
@@ -158,6 +164,7 @@ class PLNRAGService:
                         ),
                         pln_canonicalized=pln_canonicalized,
                         atomspace_added=added,
+                        schema_alignment=schema_alignment,
                     )
                 )
 
@@ -200,97 +207,119 @@ class PLNRAGService:
 
     #  Query
 
-    def _aligned_query_candidates(
+    def _qdrant_context_with_matches(
+        self,
+        text: str,
+        top_k: int,
+    ) -> tuple[List[str], List[dict]]:
+        if not self._vector_store:
+            return [], []
+        matches, _ = self._vector_store.search(text, top_k=top_k)
+        context: List[str] = []
+        for item in matches:
+            pln = item.get("pln", [])
+            if isinstance(pln, list):
+                context.extend(pln)
+        return context, matches
+
+    def _alignment_matches(self, matches: List[dict]) -> List[dict]:
+        cfg = get_settings()
+        min_score = float(getattr(cfg, "query_alignment_min_score", 0.0) or 0.0)
+        return [
+            match
+            for match in matches
+            if float(match.get("score") or 0.0) >= min_score
+        ]
+
+    def _query_candidates(
         self,
         question: str,
-    ) -> tuple[List[str], List[dict]]:
-        if not self._vector_store or not self._query_alignment_enabled:
-            return [], []
-        matches, _ = self._vector_store.search(
-            question,
-            top_k=self._query_alignment_top_k,
-            min_score=self._query_alignment_min_score,
-        )
-        alignment = build_aligned_queries(question, matches)
-        return alignment.queries, alignment.matches
-
-    def _ordered_query_candidates(
-        self,
-        aligned_queries: List[str],
+        qdrant_queries: List[str],
         parser_queries: List[str],
     ) -> List[tuple[str, str]]:
-        ordered: List[tuple[str, str]] = []
-        seen = set()
+        entries: List[tuple[str, str]] = []
+        seen: set[str] = set()
+        filtered_qdrant = filter_queries_by_question_intent(
+            question,
+            qdrant_queries,
+        )
+        filtered_parser = filter_queries_by_question_intent(
+            question,
+            parser_queries,
+        )
+        if parser_queries and not filtered_parser:
+            filtered_parser = parser_queries
+        if qdrant_queries and not filtered_qdrant and not parser_queries:
+            filtered_qdrant = qdrant_queries
         for source, queries in (
-            ("qdrant_alignment", aligned_queries),
-            ("parser", parser_queries),
+            ("qdrant_alignment", filtered_qdrant),
+            ("parser", filtered_parser),
         ):
             for query in queries:
-                if query in seen:
+                clean = " ".join(str(query).split())
+                if not clean or clean in seen:
                     continue
-                seen.add(query)
-                ordered.append((query, source))
-        return ordered
-
-    def _execute_query_candidates(
-        self,
-        candidates: List[tuple[str, str]],
-        original_query: str,
-    ) -> tuple[str, str, List[str]]:
-        first_success: tuple[str, str, List[str]] | None = None
-        last_candidate = ""
-        last_source = "none"
-
-        for candidate, source in candidates:
-            last_candidate = candidate
-            last_source = source
-            proof_traces = self._reasoner.query(candidate)
-            if not proof_traces:
-                continue
-            if first_success is None:
-                first_success = (candidate, source, proof_traces)
-            if original_query and candidate == original_query:
-                return candidate, source, proof_traces
-
-        if first_success is not None:
-            return first_success
-        return last_candidate, last_source, []
+                seen.add(clean)
+                entries.append((clean, source))
+        return entries
 
     async def query(self, question: str) -> QueryResponse:
+        cfg = get_settings()
         # 1. Retrieve context for translation
+        t0 = time.perf_counter()
         if self._vector_store:
-            context, _ = self._vector_store.retrieve_context(
-                question, top_k=self._context_top_k
+            context, qdrant_matches = self._qdrant_context_with_matches(
+                question,
+                top_k=max(
+                    self._context_top_k,
+                    int(getattr(cfg, "query_alignment_top_k", 0) or 0),
+                ),
             )
         else:
-            context = []
+            context, qdrant_matches = [], []
+        alignment_matches = self._alignment_matches(qdrant_matches)
+        qdrant_alignment = (
+            build_aligned_queries(question, alignment_matches)
+            if getattr(cfg, "query_alignment_enabled", True)
+            else None
+        )
+        qdrant_queries = qdrant_alignment.queries if qdrant_alignment else []
+        seed_terms = extract_forward_seed_terms(alignment_matches)
         context = self._enrich_context(context)
-        aligned_queries, _qdrant_matches = self._aligned_query_candidates(question)
+        context_retrieval_seconds = time.perf_counter() - t0
 
         # 2. Parse question → PLN query
-        if hasattr(self._parser, "parse_query"):
-            parse_result = self._parser.parse_query(question, context)
-        else:
-            parse_result = self._parser.parse(question, context)
+        t1 = time.perf_counter()
+        parse_result = self._parser.parse_query(question, context)
+        parse_query_seconds = time.perf_counter() - t1
 
-        original_query = (
-            parse_result.queries[0]
-            if parse_result.queries
-            else aligned_queries[0] if aligned_queries else ""
+        original_query = parse_result.queries[0] if parse_result.queries else (
+            qdrant_queries[0] if qdrant_queries else ""
         )
-        if not parse_result.queries and not aligned_queries:
+        candidate_entries = self._query_candidates(
+            question,
+            qdrant_queries,
+            parse_result.queries,
+        )
+        if not candidate_entries:
             return QueryResponse(
                 question=question,
                 pln_query="",
                 original_query="",
                 executed_query="",
                 query_source="none",
-                alignment_used=False,
                 fallback_used=False,
                 query_status="no_query",
                 raw_proof="",
                 sources=[],
                 answer="I couldn't translate this question into a logical query.",
+                qdrant_aligned_queries=qdrant_queries,
+                execution_candidates=[],
+                context_retrieval_seconds=round(context_retrieval_seconds, 4),
+                parse_query_seconds=round(parse_query_seconds, 4),
+                reasoning_seconds=0.0,
+                source_lookup_seconds=0.0,
+                answer_generation_seconds=0.0,
             )
 
         # 3. Add any supporting statements the parser generated for the query
@@ -298,24 +327,99 @@ class PLNRAGService:
             self._reasoner.add_statements(parse_result.statements)
 
         # 4. Run reasoning via PeTTaChainer against ordered candidates
-        parser_candidates = (
-            parse_result.queries if self._query_fallback_enabled else parse_result.queries[:1]
+        t2 = time.perf_counter()
+        proof_traces: List[str] = []
+        executed_query = ""
+        executed_source = "none"
+        candidates = (
+            candidate_entries
+            if self._query_fallback_enabled
+            else candidate_entries[:1]
         )
-        candidates = self._ordered_query_candidates(aligned_queries, parser_candidates)
-        executed_query, executed_source, proof_traces = self._execute_query_candidates(
-            candidates,
-            original_query,
-        )
+
+        candidate_count_total = len(candidates)
+        max_tries = int(getattr(cfg, "query_candidate_max_tries", 0) or 0)
+        if self._query_fallback_enabled and max_tries > 0:
+            candidates = candidates[:max_tries]
+        candidate_count_tried = len(candidates)
+
+        executed_candidate_index: int | None = None
+        retry_used = False
+        for idx, (candidate, source) in enumerate(candidates):
+            executed_query = candidate
+            executed_source = source
+            executed_candidate_index = idx
+            proof_traces = self._reasoner.query(candidate, seed_terms=seed_terms)
+            if proof_traces:
+                break
+
+        if not proof_traces and hasattr(self._parser, "retry_parse_query"):
+            try:
+                retry = getattr(self._parser, "retry_parse_query")
+                retry_result = retry(question, context, executed_query)
+                if retry_result and retry_result.queries:
+                    retry_used = True
+                    more = (
+                        retry_result.queries
+                        if self._query_fallback_enabled
+                        else retry_result.queries[:1]
+                    )
+                    candidate_count_total += len(more)
+                    if self._query_fallback_enabled and max_tries > 0:
+                        remaining = max_tries - candidate_count_tried
+                        more = more[: max(remaining, 0)]
+                    candidate_count_tried += len(more)
+                    for idx, candidate in enumerate(
+                        more, start=(executed_candidate_index or 0) + 1
+                    ):
+                        executed_query = candidate
+                        executed_source = "parser"
+                        executed_candidate_index = idx
+                        proof_traces = self._reasoner.query(
+                            candidate,
+                            seed_terms=seed_terms,
+                        )
+                        if proof_traces:
+                            break
+            except Exception as exc:
+                print(f"[Service] retry_parse_query failed: {exc}")
+
+        reasoning_seconds = time.perf_counter() - t2
 
         raw_proof = str(proof_traces)
-        fallback_used = bool(executed_query and original_query and executed_query != original_query)
-        query_status = self._classify_query_status(question, original_query, fallback_used)
+        fallback_used = bool(
+            executed_source == "parser"
+            and executed_query
+            and original_query
+            and executed_query != original_query
+        )
+        query_status = self._classify_query_status(
+            question,
+            executed_query or original_query,
+            fallback_used,
+        )
 
         # 5. Reverse-lookup NL sources from proof atoms
-        sources = self._extract_sources(proof_traces)
+        t3 = time.perf_counter()
+        sources: List[str] = []
+        if cfg.source_lookup_max_atoms > 0:
+            sources = self._extract_sources(
+                proof_traces, max_atoms=cfg.source_lookup_max_atoms
+            )
+        source_lookup_seconds = time.perf_counter() - t3
 
         # 6. Generate natural language answer
-        answer = self._answer_gen.generate(question, proof_traces)
+        t4 = time.perf_counter()
+        if cfg.answer_generation_enabled:
+            answer = self._answer_gen.generate(
+                question,
+                proof_traces,
+                executed_query=executed_query,
+            )
+            answer_generation_seconds = time.perf_counter() - t4
+        else:
+            answer = ""
+            answer_generation_seconds = 0.0
         if not proof_traces and query_status == "weakly_aligned":
             answer = (
                 "No proof was found. The generated query is only weakly aligned with the current "
@@ -328,53 +432,69 @@ class PLNRAGService:
             original_query=original_query,
             executed_query=executed_query,
             query_source=executed_source,
-            alignment_used=executed_source == "qdrant_alignment",
             fallback_used=fallback_used,
             query_status=query_status,
             raw_proof=raw_proof,
             sources=sources,
             answer=answer,
+            qdrant_aligned_queries=qdrant_queries,
+            execution_candidates=[candidate for candidate, _ in candidates],
+            candidate_count=candidate_count_total,
+            candidate_count_tried=candidate_count_tried,
+            executed_candidate_index=executed_candidate_index,
+            retry_used=retry_used,
+            context_retrieval_seconds=round(context_retrieval_seconds, 4),
+            parse_query_seconds=round(parse_query_seconds, 4),
+            reasoning_seconds=round(reasoning_seconds, 4),
+            source_lookup_seconds=round(source_lookup_seconds, 4),
+            answer_generation_seconds=round(answer_generation_seconds, 4),
         )
 
     async def debug_query(self, question: str) -> DebugQueryResponse:
+        cfg = get_settings()
         if self._vector_store:
-            context, _ = self._vector_store.retrieve_context(
-                question, top_k=self._context_top_k
+            context, qdrant_matches = self._qdrant_context_with_matches(
+                question,
+                top_k=max(
+                    self._context_top_k,
+                    int(getattr(cfg, "query_alignment_top_k", 0) or 0),
+                ),
             )
         else:
-            context = []
+            context, qdrant_matches = [], []
+        alignment_matches = self._alignment_matches(qdrant_matches)
+        qdrant_alignment = (
+            build_aligned_queries(question, alignment_matches)
+            if getattr(cfg, "query_alignment_enabled", True)
+            else None
+        )
+        qdrant_queries = qdrant_alignment.queries if qdrant_alignment else []
+        seed_terms = extract_forward_seed_terms(alignment_matches)
         context = self._enrich_context(context)
-        aligned_queries, qdrant_matches = self._aligned_query_candidates(question)
 
-        debug_parse_query = getattr(self._parser, "debug_parse_query", None)
-        if callable(debug_parse_query):
-            debug_info = debug_parse_query(question, context)
-            langextract_info = debug_info.get("langextract_postprocessed", {})
-            pln_candidates = debug_info.get("pln_canonicalized", [])
-            supporting_statements = debug_info.get("supporting_statements", [])
-        else:
-            if hasattr(self._parser, "parse_query"):
-                parse_result = self._parser.parse_query(question, context)
-            else:
-                parse_result = self._parser.parse(question, context)
-            langextract_info = {"queries": parse_result.queries}
-            pln_candidates = parse_result.queries
-            supporting_statements = parse_result.statements
+        debug_info = self._parser.debug_parse_query(question, context)
+        langextract_info = debug_info.get("langextract_postprocessed", {})
+        pln_candidates = debug_info.get("pln_canonicalized", [])
+        supporting_statements = debug_info.get("supporting_statements", [])
 
         if supporting_statements:
             self._reasoner.add_statements(supporting_statements)
 
-        original_query = (
-            pln_candidates[0]
-            if pln_candidates
-            else aligned_queries[0] if aligned_queries else ""
+        original_query = pln_candidates[0] if pln_candidates else (
+            qdrant_queries[0] if qdrant_queries else ""
         )
-        if not pln_candidates and not aligned_queries:
+        candidate_entries = self._query_candidates(
+            question,
+            qdrant_queries,
+            pln_candidates,
+        )
+        if not candidate_entries:
             return DebugQueryResponse(
                 question=question,
                 context=context,
                 qdrant_matches=qdrant_matches,
-                qdrant_aligned_queries=aligned_queries,
+                qdrant_aligned_queries=qdrant_queries,
+                execution_candidates=[],
                 langextract_postprocessed=LangExtractQueryPostprocessed(
                     **langextract_info
                 ),
@@ -389,23 +509,49 @@ class PLNRAGService:
                 answer="I couldn't translate this question into a logical query.",
             )
 
-        parser_candidates = (
-            pln_candidates if self._query_fallback_enabled else pln_candidates[:1]
+        candidates = (
+            candidate_entries
+            if self._query_fallback_enabled
+            else candidate_entries[:1]
         )
-        candidates = self._ordered_query_candidates(aligned_queries, parser_candidates)
-        executed_query, executed_source, proof_traces = self._execute_query_candidates(
-            candidates,
-            original_query,
-        )
+        max_tries = int(getattr(cfg, "query_candidate_max_tries", 0) or 0)
+        if self._query_fallback_enabled and max_tries > 0:
+            candidates = candidates[:max_tries]
+
+        executed_query = ""
+        executed_source = "none"
+        proof_traces: List[str] = []
+        for candidate, source in candidates:
+            executed_query = candidate
+            executed_source = source
+            proof_traces = self._reasoner.query(candidate, seed_terms=seed_terms)
+            if proof_traces:
+                break
 
         fallback_used = bool(
-            executed_query and original_query and executed_query != original_query
+            executed_source == "parser"
+            and executed_query
+            and original_query
+            and executed_query != original_query
         )
         query_status = self._classify_query_status(
-            question, original_query, fallback_used
+            question,
+            executed_query or original_query,
+            fallback_used,
         )
-        sources = self._extract_sources(proof_traces)
-        answer = self._answer_gen.generate(question, proof_traces)
+        sources: List[str] = []
+        if cfg.source_lookup_max_atoms > 0:
+            sources = self._extract_sources(
+                proof_traces, max_atoms=cfg.source_lookup_max_atoms
+            )
+        if cfg.answer_generation_enabled:
+            answer = self._answer_gen.generate(
+                question,
+                proof_traces,
+                executed_query=executed_query,
+            )
+        else:
+            answer = ""
         if not proof_traces and query_status == "weakly_aligned":
             answer = (
                 "No proof was found. The generated query is only weakly aligned with the current "
@@ -416,7 +562,8 @@ class PLNRAGService:
             question=question,
             context=context,
             qdrant_matches=qdrant_matches,
-            qdrant_aligned_queries=aligned_queries,
+            qdrant_aligned_queries=qdrant_queries,
+            execution_candidates=[candidate for candidate, _ in candidates],
             langextract_postprocessed=LangExtractQueryPostprocessed(
                 **langextract_info
             ),
@@ -465,11 +612,14 @@ class PLNRAGService:
         variables = set(re.findall(r"[$?][A-Za-z_][A-Za-z0-9_]*", query))
         return bool(variables - {"$prf", "$tv", "?prf", "?tv"})
 
-    def _extract_sources(self, proof_traces: List[str]) -> List[str]:
+    def _extract_sources(self, proof_traces: List[str], max_atoms: int = 30) -> List[str]:
         """
         Extract atom names from proof traces and reverse-lookup
         their NL source sentences from the vector store.
         """
+        if max_atoms <= 0:
+            return []
+
         atoms_to_search = set()
         if not self._vector_store:
             return []
@@ -479,6 +629,9 @@ class PLNRAGService:
                     atoms_to_search.add(match)
 
         sources = set()
+        if len(atoms_to_search) > max_atoms:
+            atoms_to_search = set(list(atoms_to_search)[:max_atoms])
+
         for atom_str in atoms_to_search:
             try:
                 vector = self._vector_store.embed(atom_str)
@@ -504,9 +657,7 @@ class PLNRAGService:
     def reset(self, scope: str):
         if scope in ("all", "atomspace"):
             self._reasoner.reset()
-            reset_parser = getattr(self._parser, "reset", None)
-            if callable(reset_parser):
-                reset_parser()
+            self._parser.reset()
         if scope in ("all", "vectordb") and self._vector_store:
             self._vector_store.reset()
 
@@ -517,4 +668,18 @@ class PLNRAGService:
             "atomspace_size": self._reasoner.size,
             "vectordb_count": self._vector_store.count if self._vector_store else 0,
             "parser": self._parser.__class__.__name__,
+        }
+
+    def debug_qdrant(self, limit: int = 50) -> dict:
+        if not self._vector_store:
+            return {
+                "enabled": False,
+                "count": 0,
+                "points": [],
+            }
+        capped_limit = max(1, min(limit, 200))
+        return {
+            "enabled": True,
+            "count": self._vector_store.count,
+            "points": self._vector_store.list_points(limit=capped_limit),
         }

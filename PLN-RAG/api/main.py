@@ -9,10 +9,10 @@ from api.models import (
     HealthResponse,
     DebugIngestRequest, DebugIngestResponse,
     DebugQueryRequest, DebugQueryResponse,
+    DebugQdrantResponse,
 )
 from core.service import PLNRAGService
-from parsers import get_parser
-from config import get_settings
+from parsers import LangExtractPLNParser
 
 _start_time = time.time()
 _service: PLNRAGService | None = None
@@ -21,9 +21,8 @@ _service: PLNRAGService | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _service
-    cfg = get_settings()
-    print(f"[Startup] Loading parser: {cfg.parser}")
-    parser = get_parser()
+    print("[Startup] Initializing LangExtract parser...")
+    parser = LangExtractPLNParser()
     _service = PLNRAGService(parser)
     print("[Startup] Service ready.")
     yield
@@ -119,3 +118,12 @@ async def debug_query(req: DebugQueryRequest):
     """
     svc = get_service()
     return await svc.debug_query(req.question)
+
+
+@app.get("/debug/qdrant", response_model=DebugQdrantResponse)
+async def debug_qdrant(limit: int = 50):
+    """
+    Inspect raw Qdrant payloads stored during ingest.
+    """
+    svc = get_service()
+    return svc.debug_qdrant(limit=limit)

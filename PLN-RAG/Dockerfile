@@ -40,7 +40,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PETTA_COMMIT=e1490899cefc67c128d5311ff4861f9997674957
-ENV PETTACHAINER_COMMIT=d21b93b5132a7fc8722f64d57b74fb7c3a8d1faa
+ENV PETTACHAINER_COMMIT=ea9f14bce379dbe4bb5dcb80ae09cdf3c7a3cff6
 
 RUN sed -i \
     -e 's|http://archive.ubuntu.com/ubuntu|http://azure.archive.ubuntu.com/ubuntu|g' \

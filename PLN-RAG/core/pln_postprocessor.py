@@ -4,11 +4,14 @@ import re
 from dataclasses import dataclass, field
 from typing import List
 
+from core.pln_schema_alignment import PLNSchemaAligner
+
 
 @dataclass
 class PLNPostprocessResult:
     statements: List[str] = field(default_factory=list)
     queries: List[str] = field(default_factory=list)
+    alignment_decisions: List[dict] = field(default_factory=list)
 
 
 class PLNPostprocessor:
@@ -47,15 +50,6 @@ class PLNPostprocessor:
         "is_a": "IsA",
         "kind_of": "IsA",
         "type_of": "IsA",
-        "works_night_shift": "HasIrregularSleep",
-        "irregular_sleep": "HasIrregularSleep",
-        "has_irregular_sleep": "HasIrregularSleep",
-        "uses_two_factor_auth": "HasStrongAccountSecurity",
-        "two_factor_enabled": "HasStrongAccountSecurity",
-        "has_two_factor_auth": "HasStrongAccountSecurity",
-        "uses_protective_gear": "HasSafetyCompliance",
-        "safety_compliant": "HasSafetyCompliance",
-        "has_safety_compliance": "HasSafetyCompliance",
         "located_at": "At",
         "located_in": "In",
         "inside_of": "Inside",
@@ -79,6 +73,9 @@ class PLNPostprocessor:
     }
     QUERY_MARKERS = {"who", "what", "when", "where", "why", "how", "which"}
 
+    def __init__(self):
+        self._schema_alignment = PLNSchemaAligner(self.STRUCTURAL_HEADS)
+
     def process(
         self,
         *,
@@ -91,28 +88,55 @@ class PLNPostprocessor:
         concepts = self.extract_concepts(self.normalize_text(text))
         protected_constants = self.extract_protected_constants(text)
         proper_name_map = self.extract_proper_name_map(text)
+        alignment_decisions: List[dict] = []
 
         processed_statements = self.canonicalize_outputs(
             self.dedupe_preserve_order(statements),
             concepts,
             protected_constants,
             proper_name_map,
+            context,
         )
         processed_queries = self.canonicalize_outputs(
             self.dedupe_preserve_order(queries),
             concepts,
             protected_constants,
             proper_name_map,
+            context,
+        )
+        property_predicates = self.collect_property_predicate_heads(
+            processed_statements + processed_queries + context
+        )
+        processed_statements = self.normalize_dynamic_property_types(
+            processed_statements,
+            property_predicates,
+        )
+        processed_queries = self.normalize_dynamic_property_types(
+            processed_queries,
+            property_predicates,
         )
         processed_statements = [
             self.prune_generic_sortal_premises(stmt) for stmt in processed_statements
         ]
-        
-        # Universal Identity Expansion
-        identity_statements = self.generate_universal_identity(processed_statements)
-        processed_statements.extend(identity_statements)
 
-        processed_statements = self.filter_statements(processed_statements)
+        # Materialize grounded premise facts (colleague's approach)
+        materialized = self._materialize_grounded_premise_facts(text, processed_statements)
+        processed_statements.extend(materialized)
+
+        # Infer types for proper names that appear in statements
+        inferred_types = self.infer_entity_types(processed_statements, proper_name_map)
+        processed_statements.extend(inferred_types)
+
+        bridges, bridge_decisions = self._schema_alignment.build_bridges(
+            processed_statements,
+            context,
+        )
+        processed_statements.extend(bridges)
+        alignment_decisions.extend(bridge_decisions)
+
+        processed_statements = self.ensure_statement_format(
+            self.filter_statements(processed_statements)
+        )
         if plan_queries:
             processed_queries = self.plan_queries(
                 question=text,
@@ -123,7 +147,55 @@ class PLNPostprocessor:
         return PLNPostprocessResult(
             statements=processed_statements,
             queries=processed_queries,
+            alignment_decisions=alignment_decisions,
         )
+
+    def ensure_statement_format(self, statements: List[str]) -> List[str]:
+        formatted: List[str] = []
+        for index, statement in enumerate(statements, start=1):
+            clean = " ".join(str(statement).split())
+            if not clean:
+                continue
+            if clean.startswith("(:"):
+                query_shaped = re.fullmatch(
+                    r"\(:\s+[$?]prf\s+(.+)\s+[$?]tv\)",
+                    clean,
+                )
+                if query_shaped:
+                    payload = query_shaped.group(1)
+                    name = self.statement_name_from_payload(payload, index)
+                    formatted.append(f"(: {name} {payload} (STV 1.0 1.0))")
+                    continue
+                formatted.append(clean)
+                continue
+            if re.fullmatch(r"\([A-Za-z][A-Za-z0-9_]*(?:\s+[^()\s]+)+\)", clean):
+                name = self.statement_name_from_atom(clean, index)
+                formatted.append(f"(: {name} {clean} (STV 1.0 1.0))")
+        return self.dedupe_preserve_order(formatted)
+
+    def statement_name_from_payload(self, payload: str, index: int) -> str:
+        simple = self._schema_alignment.parse_simple_atom(payload)
+        if simple:
+            atom = f"({simple['head']} {' '.join(simple['args'])})"
+            return self.statement_name_from_atom(atom, index)
+        head_match = re.search(r"\(([A-Za-z][A-Za-z0-9_]*)", payload)
+        if head_match:
+            head = self.canonical_symbol(head_match.group(1), lemmatize=False)
+            return f"{head}_rule_{index}"[:80]
+        return f"stmt_{index}"
+
+    def statement_name_from_atom(self, atom: str, index: int) -> str:
+        match = re.fullmatch(r"\(([A-Za-z][A-Za-z0-9_]*)(?:\s+([^()]+))\)", atom)
+        if not match:
+            return f"stmt_{index}"
+        head = self.canonical_symbol(match.group(1), lemmatize=False)
+        args = [
+            self.canonical_symbol(arg.lstrip("$?"), lemmatize=False)
+            for arg in match.group(2).split()[:2]
+            if arg
+        ]
+        parts = [part for part in args + [head, "fact"] if part]
+        return "_".join(parts)[:80] or f"stmt_{index}"
 
     def normalize_text(self, text: str) -> str:
         text = text.lower().replace("-", " ")
@@ -167,6 +239,52 @@ class PLNPostprocessor:
                         terms.add(token)
         
         return [f"(IsA {t} {t})" for t in terms]
+    def infer_entity_types(self, statements, proper_name_map):
+        """
+        Infer (IsA entity person) for proper names that appear as the FIRST argument
+        (subject/actor) of predicates in statements, but have no explicit type declaration.
+        Uses proper_name_map from source text as the candidate set.
+        Entities that only appear as objects (2nd+ arg) are not inferred as persons.
+        """
+        candidate_entities = set(proper_name_map.values())
+        # Exclude identifiers containing digits (Object-77, Unit-12, Rack-01, etc.)
+        non_person = re.compile("[0-9]")
+        person_candidates = {
+            e for e in candidate_entities
+            if len(e) > 1 and not non_person.search(e)
+        }
+
+        # Collect entities that already have explicit type declarations
+        entities_with_types = set()
+        for stmt in statements:
+            for match in re.finditer("\\(IsA\\s+(\\S+)\\s+\\S+\\)", stmt):
+                entities_with_types.add(match.group(1))
+
+        # Collect entities that appear as the FIRST argument of a predicate
+        # Pattern: (PredicateName first_arg ...) where PredicateName starts uppercase
+        entities_as_subject = set()
+        for stmt in statements:
+            for match in re.finditer("\\(([A-Z][A-Za-z0-9_]*)\\s+(\\S+)", stmt):
+                pred = match.group(1)
+                first_arg = match.group(2)
+                # Skip structural keywords and variables
+                if pred in self.STRUCTURAL_HEADS:
+                    continue
+                if first_arg.startswith("$") or first_arg.startswith("?"):
+                    continue
+                entities_as_subject.add(first_arg)
+
+        inferred = []
+        for entity in sorted(person_candidates):
+            if entity in entities_with_types:
+                continue
+            if entity not in entities_as_subject:
+                continue
+            inferred.append(
+                "(: " + entity + "_is_person (IsA " + entity + " person) (STV 1.0 1.0))"
+            )
+        return inferred
+
     def pluralize(self, word: str) -> str:
         if word.endswith("y") and len(word) > 2:
             return word[:-1] + "ies"
@@ -189,12 +307,59 @@ class PLNPostprocessor:
                     return predicates
         return predicates
 
+    def extract_context_symbol_map(self, context: List[str]) -> dict[str, str]:
+        symbol_map: dict[str, str] = {}
+        facts, conclusions = self._schema_alignment.collect_available_signatures(
+            [],
+            context,
+        )
+        premises = self._schema_alignment.collect_premise_signatures(
+            context,
+            origin="context",
+        )
+
+        for signature in facts + conclusions + premises:
+            for arg in signature["args"]:
+                if arg.startswith(("$", "?")):
+                    continue
+                symbol_map.setdefault(arg, arg)
+                singular = self.canonical_symbol(arg, lemmatize=True)
+                plural = self.pluralize(singular) if singular else ""
+                if singular:
+                    symbol_map.setdefault(singular, arg)
+                if plural:
+                    symbol_map.setdefault(plural, arg)
+        return symbol_map
+
+    def extract_context_predicate_map(self, context: List[str]) -> dict[str, str]:
+        predicate_map: dict[str, str] = {}
+        facts, conclusions = self._schema_alignment.collect_available_signatures(
+            [],
+            context,
+        )
+        premises = self._schema_alignment.collect_premise_signatures(
+            context,
+            origin="context",
+        )
+        for signature in facts + conclusions + premises:
+            head = signature["head"]
+            if head in self._schema_alignment.skip_heads:
+                continue
+            normalized = self.canonical_symbol(head, lemmatize=False)
+            normalized_lemma = self.canonical_symbol(head, lemmatize=True)
+            if normalized:
+                predicate_map.setdefault(normalized, head)
+            if normalized_lemma:
+                predicate_map.setdefault(normalized_lemma, head)
+        return predicate_map
+
     def canonicalize_outputs(
         self,
         items: List[str],
         concepts: List[str],
         protected_constants: set[str],
         proper_name_map: dict[str, str],
+        context: List[str],
     ) -> List[str]:
         if not items:
             return items
@@ -203,9 +368,17 @@ class PLNPostprocessor:
         for concept in concepts:
             concept_map[concept] = concept
             concept_map[self.pluralize(concept)] = concept
+        concept_map.update(self.extract_context_symbol_map(context))
+        predicate_map = self.extract_context_predicate_map(context)
 
         canonical_items = [
-            self.canonicalize_atom(item, concept_map, protected_constants, proper_name_map)
+            self.canonicalize_atom(
+                item,
+                concept_map,
+                protected_constants,
+                proper_name_map,
+                predicate_map,
+            )
             for item in items
         ]
         canonical_items = [self.normalize_isa_classes(item) for item in canonical_items]
@@ -217,6 +390,7 @@ class PLNPostprocessor:
         concept_map: dict[str, str],
         protected_constants: set[str],
         proper_name_map: dict[str, str],
+        predicate_map: dict[str, str],
     ) -> str:
         result: List[str] = []
         i = 0
@@ -238,6 +412,7 @@ class PLNPostprocessor:
                         concept_map,
                         protected_constants,
                         proper_name_map,
+                        predicate_map,
                     )
                 )
                 continue
@@ -259,6 +434,7 @@ class PLNPostprocessor:
         concept_map: dict[str, str],
         protected_constants: set[str],
         proper_name_map: dict[str, str],
+        predicate_map: dict[str, str],
     ) -> str:
         if token.startswith("$"):
             return "$" + self.canonical_symbol(token[1:], lemmatize=False)
@@ -266,7 +442,7 @@ class PLNPostprocessor:
             return "?" + self.canonical_symbol(token[1:], lemmatize=False)
 
         if head:
-            canonical = self.canonical_head(token)
+            canonical = self.canonical_head(token, predicate_map)
             return canonical if canonical else token
 
         lowered = token.lower()
@@ -276,11 +452,18 @@ class PLNPostprocessor:
             return concept_map[lowered]
         return self.canonical_symbol(token, protect=lowered in protected_constants)
 
-    def canonical_head(self, token: str) -> str:
+    def canonical_head(
+        self,
+        token: str,
+        predicate_map: dict[str, str] | None = None,
+    ) -> str:
         if token in self.STRUCTURAL_HEADS:
             return token
+        normalized = self.canonical_symbol(token, lemmatize=False)
+        if predicate_map and normalized in predicate_map:
+            return predicate_map[normalized]
         return self.PREDICATE_ALIASES.get(
-            self.canonical_symbol(token, lemmatize=False),
+            normalized,
             token,
         )
 
@@ -355,7 +538,7 @@ class PLNPostprocessor:
 
         kept: List[str] = []
         for premise in premises:
-            parsed = self.parse_simple_atom(premise)
+            parsed = self._schema_alignment.parse_simple_atom(premise)
             if not parsed:
                 kept.append(premise)
                 continue
@@ -389,6 +572,50 @@ class PLNPostprocessor:
 
         return re.sub(r"\(IsA\s+([^()\s]+)\s+([^()\s]+)\)", repl, text)
 
+    def collect_property_predicate_heads(self, items: List[str]) -> set[str]:
+        heads: set[str] = set()
+        for item in items:
+            for match in re.finditer(r"\(([A-Za-z][A-Za-z0-9_]*)", str(item)):
+                head = match.group(1)
+                if head in self.STRUCTURAL_HEADS:
+                    continue
+                if not re.fullmatch(r"Is[A-Z][A-Za-z0-9_]*", head):
+                    continue
+                heads.add(head)
+        return heads
+
+    def normalize_dynamic_property_types(
+        self,
+        items: List[str],
+        property_predicates: set[str],
+    ) -> List[str]:
+        if not property_predicates:
+            return items
+
+        normalized: List[str] = []
+        for item in items:
+            clean = str(item)
+
+            def repl(match: re.Match[str]) -> str:
+                subject = match.group(1)
+                klass = self.canonical_symbol(match.group(2), lemmatize=True)
+                candidate = "Is" + self.pascal_symbol(klass)
+                if candidate in property_predicates:
+                    return f"({candidate} {subject})"
+                return match.group(0)
+
+            normalized.append(
+                re.sub(r"\(IsA\s+([^()\s]+)\s+([^()\s]+)\)", repl, clean)
+            )
+        return normalized
+
+    def pascal_symbol(self, symbol: str) -> str:
+        return "".join(
+            part[:1].upper() + part[1:]
+            for part in re.split(r"[^A-Za-z0-9]+", symbol)
+            if part
+        )
+
     def plan_queries(
         self,
         question: str,
@@ -399,12 +626,15 @@ class PLNPostprocessor:
         if not queries:
             return queries
 
-        facts, conclusions = self.collect_available_signatures(statements, context)
+        facts, conclusions = self._schema_alignment.collect_available_signatures(
+            statements,
+            context,
+        )
         is_yes_no = self.is_yes_no_question(question)
         planned: List[tuple[int, str]] = []
 
         for query in queries:
-            parsed = self.parse_query_signature(query)
+            parsed = self._schema_alignment.parse_query_signature(query)
             if not parsed:
                 continue
             score = self.score_query_candidate(parsed, facts, conclusions, is_yes_no)
@@ -414,26 +644,124 @@ class PLNPostprocessor:
 
         if not planned:
             if is_yes_no:
+                semantic_fallback = self.build_semantic_context_fallbacks(
+                    question,
+                    facts,
+                    conclusions,
+                )
                 fallback = self.build_grounded_yes_no_fallbacks(
                     question,
                     queries,
                     facts,
                     conclusions,
                 )
-                return self.dedupe_preserve_order(queries + fallback)
+                return self.filter_query_candidates(
+                    self.dedupe_preserve_order(semantic_fallback + queries + fallback)
+                )
             return queries[:1]
 
         planned.sort(key=lambda item: item[0], reverse=True)
         ordered = [query for _, query in planned]
         if is_yes_no:
+            semantic_fallback = self.build_semantic_context_fallbacks(
+                question,
+                facts,
+                conclusions,
+            )
             fallback = self.build_grounded_yes_no_fallbacks(
                 question,
                 queries,
                 facts,
                 conclusions,
             )
-            ordered.extend(fallback)
-        return self.dedupe_preserve_order(ordered)
+            ordered = semantic_fallback + ordered + fallback
+            # Add heuristic query patterns (colleague's approach)
+            heuristic = self.build_heuristic_question_queries(question)
+            ordered.extend(heuristic)
+        return self.filter_query_candidates(self.dedupe_preserve_order(ordered))
+
+    def filter_query_candidates(self, queries: List[str]) -> List[str]:
+        filtered: List[str] = []
+        for query in queries:
+            parsed = self._schema_alignment.parse_query_signature(query)
+            if not parsed:
+                continue
+            if parsed["head"] == "IsA" and parsed["arity"] != 2:
+                continue
+            if parsed["arity"] == 0:
+                continue
+            filtered.append(query)
+        return filtered
+
+    def build_semantic_context_fallbacks(
+        self,
+        question: str,
+        facts: list[dict],
+        conclusions: list[dict],
+    ) -> List[str]:
+        entities = self.extract_question_constants(question)
+        if not entities:
+            return []
+
+        question_terms = set(self.extract_question_terms(question))
+        candidates: List[tuple[int, str]] = []
+        for signature in conclusions + facts:
+            if not signature["args"]:
+                continue
+            score = self.semantic_signature_score(signature, question_terms)
+            if score <= 0:
+                continue
+            for entity in entities:
+                grounded = self.ground_signature_with_entity(signature, entity)
+                if grounded:
+                    candidates.append(
+                        (score, self._schema_alignment.signature_to_query(grounded))
+                    )
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return self.dedupe_preserve_order([query for _, query in candidates])
+
+    def extract_question_terms(self, question: str) -> List[str]:
+        terms: List[str] = []
+        for token in re.findall(r"\b[A-Za-z0-9][A-Za-z0-9_-]*\b", question):
+            lowered = token.lower()
+            if len(lowered) < 2 or lowered in self.STOPWORDS:
+                continue
+            canonical = self.canonical_symbol(lowered, lemmatize=True)
+            if canonical and canonical not in terms:
+                terms.append(canonical)
+        return terms
+
+    def semantic_signature_score(self, signature: dict, question_terms: set[str]) -> int:
+        head_terms = self._schema_alignment.normalized_head_terms(signature["head"])
+        if not head_terms or not question_terms:
+            return 0
+        normalized_question = self._schema_alignment.normalized_terms(question_terms)
+        overlap = head_terms.intersection(normalized_question)
+        domain_overlap = self._schema_alignment.bridge_domain_terms(overlap)
+        if not domain_overlap and self._schema_alignment.bridge_domain_terms(head_terms):
+            return 0
+        return len(overlap) * 4 + len(domain_overlap) * 3
+
+    def ground_signature_with_entity(self, signature: dict, entity: str) -> dict | None:
+        args = list(signature["args"])
+        if not args:
+            return None
+        variables = signature.get("variables", [])
+        if variables:
+            first_var = variables[0]
+            args = [entity if arg == first_var else arg for arg in args]
+        elif entity not in args:
+            if len(args) == 1:
+                args = [entity]
+            else:
+                return None
+        return {
+            "head": signature["head"],
+            "args": args,
+            "arity": len(args),
+            "variables": [arg for arg in args if arg.startswith(("$", "?"))],
+        }
 
     def build_grounded_yes_no_fallbacks(
         self,
@@ -445,7 +773,9 @@ class PLNPostprocessor:
         parsed_queries = [
             parsed
             for query in queries
-            if (parsed := self.parse_query_signature(query)) is not None
+            if (
+                parsed := self._schema_alignment.parse_query_signature(query)
+            ) is not None
         ]
         if not parsed_queries:
             return []
@@ -473,79 +803,78 @@ class PLNPostprocessor:
                     score += 3
                 if signature in conclusions:
                     score += 2
-                grounded.append((score, self.signature_to_query(signature)))
+                grounded.append(
+                    (score, self._schema_alignment.signature_to_query(signature))
+                )
 
         grounded.sort(key=lambda item: item[0], reverse=True)
         return self.dedupe_preserve_order([query for _, query in grounded])
 
-    def collect_available_signatures(
-        self,
-        statements: List[str],
-        context: List[str],
-    ) -> tuple[list[dict], list[dict]]:
-        facts: list[dict] = []
-        conclusions: list[dict] = []
-        for atom in statements + context:
-            facts.extend(self.extract_fact_signatures(atom))
-            conclusions.extend(self.extract_conclusion_signatures(atom))
-        return facts, conclusions
-
-    def extract_fact_signatures(self, text: str) -> list[dict]:
-        signatures: list[dict] = []
-        for match in re.finditer(
-            r"\(:\s+[^\s()]+\s+(\([^()]+\))\s+\((?:STV|PointMass|ParticleFromNormal|ParticleFromPairs)",
-            text,
-        ):
-            parsed = self.parse_simple_atom(match.group(1))
-            if parsed and parsed["head"] != "Implication":
-                signatures.append(parsed)
-        return signatures
-
-    def extract_conclusion_signatures(self, text: str) -> list[dict]:
-        signatures: list[dict] = []
-        for block in re.finditer(r"\(Conclusions\s+((?:\([^()]+\)\s*)+)\)", text):
-            for atom in re.finditer(r"\([^()]+\)", block.group(1)):
-                parsed = self.parse_simple_atom(atom.group(0))
-                if parsed:
-                    signatures.append(parsed)
-        return signatures
-
-    def parse_query_signature(self, query: str) -> dict | None:
-        match = re.search(
-            r"\(:\s+[^\s()]+\s+(\([^()]+\))\s+\$?[A-Za-z_][A-Za-z0-9_]*\)",
-            query,
-        )
-        if not match:
-            return None
-        return self.parse_simple_atom(match.group(1))
-
-    def parse_simple_atom(self, atom: str) -> dict | None:
-        match = re.fullmatch(
-            r"\(([A-Za-z][A-Za-z0-9_]*)((?:\s+[^()\s]+)*)\)",
-            atom.strip(),
-        )
-        if not match:
-            return None
-        head = match.group(1)
-        args = [part for part in match.group(2).split() if part]
-        return {
-            "head": head,
-            "args": args,
-            "arity": len(args),
-            "variables": [arg for arg in args if arg.startswith(("$", "?"))],
-        }
-
-    def signature_to_query(self, signature: dict) -> str:
-        args = " ".join(signature["args"])
-        return f"(: $prf ({signature['head']} {args}) $tv)"
-
     def extract_question_constants(self, question: str) -> List[str]:
         constants: List[str] = []
         for token in re.findall(r"\b[A-Z][A-Za-z0-9_-]*\b", question):
+            if token.lower() in {
+                "is",
+                "are",
+                "was",
+                "were",
+                "does",
+                "do",
+                "did",
+                "can",
+                "could",
+                "has",
+                "have",
+                "had",
+            }:
+                continue
             canonical = self.canonical_symbol(token, lemmatize=False)
             if canonical and canonical not in constants:
                 constants.append(canonical)
         return constants
+
+    def build_heuristic_question_queries(self, question: str) -> List[str]:
+        """
+        Generate PLN queries from question patterns (colleague's approach).
+        Patterns like "Does X have Y?" → (: $prf (HasA X Y) $tv)
+        """
+        normalized = self.normalize_text(question).strip("? ")
+        patterns = [
+            # (regex pattern, predicate head) - more specific first, generic last
+            (r"^(?:is|are|was|were)\s+(.+?)\s+(?:consuming|consume)\s+(.+)$", "Consumes"),
+            (r"^(?:does|do|did|has|have|had)\s+(.+?)\s+consume\s+(.+)$", "Consumes"),
+            (r"^(?:does|do|did|has|have|had)\s+(.+?)\s+(?:eat|eats)\s+(.+)$", "Eats"),
+            (r"^(?:does|do|did|has|have|had)\s+(.+?)\s+(?:have|has|get)\s+(.+)$", "HasA"),
+            (r"^(?:is|are|was|were)\s+(.+?)\s+(?:a|an)\s+([a-z][a-z0-9_]*)\s*$", "IsA"),  # "Is X a Y"
+            (r"^(?:is|are)\s+(.+?)\s+(?:smart|intelligent|capable|able|mortal)$", "IsA"),
+        ]
+
+        queries: List[str] = []
+        for pattern, head in patterns:
+            match = re.match(pattern, normalized)
+            if not match:
+                continue
+            subject = self.canonical_phrase(match.group(1))
+            target = self.canonical_phrase(match.group(2)) if match.lastindex >= 2 else None
+            if subject:
+                if target:
+                    queries.append(f"(: $prf ({head} {subject} {target}) $tv)")
+                else:
+                    queries.append(f"(: $prf ({head} {subject}) $tv)")
+        return queries
+
+    def canonical_phrase(self, phrase: str) -> str:
+        """Convert a phrase to canonical underscore-separated form."""
+        tokens = [
+            token
+            for token in self.normalize_text(phrase).split()
+            if token not in {"a", "an", "the", "of", "in", "on", "at", "is", "are", "was", "were",
+                           "do", "does", "did", "have", "has", "had", "consuming", "consume",
+                           "eating", "eat", "eats", "smart", "intelligent", "capable", "able",
+                           "mortal"}
+        ]
+        normalized = [self.canonical_symbol(token, lemmatize=True) for token in tokens if token]
+        return "_".join(token for token in normalized if token)
 
     def score_query_candidate(
         self,
@@ -705,6 +1034,236 @@ class PLNPostprocessor:
             )
 
         return hints
+
+    def _materialize_grounded_premise_facts(
+        self, text: str, statements: List[str]
+    ) -> List[str]:
+        """
+        Materialize grounded premises AND conclusions from rules.
+
+        Premise materialization:
+          "People who eat fish are smart. Kebede eats fish."
+          → materializes (EatsFish kebede) as direct fact.
+
+        Conclusion materialization (when all premises are grounded):
+          Rule: EatsFrequently($x, pasta) → ConsumesExcessiveCarbs($x)
+          Fact: EatsFrequently(abebe, pasta) exists
+          → materializes (ConsumesExcessiveCarbs abebe) directly.
+        """
+        normalized = self.normalize_text(text)
+        # Skip materialization for purely definitional rules
+        conditional_phrases = (" indicate ", " indicates ", " implies ",
+                              " suggest ", " suggests ", " if ", " when ",
+                              " should ", " would ", " could ")
+        skip_materialization = any(phrase in normalized for phrase in conditional_phrases)
+
+        tokens = set(normalized.split())
+        facts: List[str] = []
+
+        # First pass: collect all existing grounded facts from statements
+        existing_facts: set[str] = set()
+        negated_facts: set[str] = set()  # Atoms that are negated (NOT True)
+        for stmt in statements:
+            # Skip rules/implications
+            if "Implication" in stmt:
+                continue
+            # Check for negated atoms: (Not (Predicate ...))
+            not_match = re.search(r"\(Not\s+\(([A-Za-z][A-Za-z0-9_]*)\s+([^\)]+)\)\)", stmt)
+            if not_match:
+                pred = not_match.group(1)
+                args = not_match.group(2).strip()
+                negated_facts.add(f"({pred} {args})")
+                continue
+            # Match typed facts: (: name (Predicate arg1 arg2) (STV ...))
+            m = re.search(r"\(:\s+\S+\s+\(([A-Za-z][A-Za-z0-9_]*)\s+([^\)]+)\)\s+\(", stmt)
+            if m:
+                pred = m.group(1)
+                args = m.group(2).strip()
+                existing_facts.add(f"({pred} {args})")
+                continue
+            # Match bare atoms: (IsA X Y) or (Predicate arg1 arg2)
+            bare_match = re.match(r"^\(([A-Za-z][A-Za-z0-9_]*)\s+([^\)]+)\)$", stmt.strip())
+            if bare_match:
+                pred = bare_match.group(1)
+                args = bare_match.group(2).strip()
+                existing_facts.add(f"({pred} {args})")
+
+        for stmt in statements:
+            # Extract (Implication (Premises ...) (Conclusions ...))
+            # Note: Conclusions may have ) from STV following it, so we match conservatively
+            m = re.search(r"\(Implication\s+\(Premises\s+(.+?)\)\s+\(Conclusions\s+((?:[^()]|\([^()]*\))+)\)\)", stmt)
+            if not m:
+                continue
+
+            premises_blob = m.group(1)
+            conclusions_blob = m.group(2)
+
+            # Parse premises to extract atoms, variables, and negation
+            premise_atoms: List[tuple[str, List[str], bool]] = []  # [(predicate, [args], negated)]
+            bindings: dict[str, str] = {}  # variable -> grounded term
+            all_grounded = True
+
+            # Parse premises with negation awareness
+            # Pattern to match atoms: optionally preceded by (Not ...)
+            # Simple atoms: (Predicate arg1 arg2)
+            # Negated atoms: (Not (Predicate arg1 arg2))
+            pos = 0
+            while pos < len(premises_blob):
+                # Try to match (Not (Predicate ...))
+                not_match = re.match(r"\s*\(Not\s+\(([A-Za-z][A-Za-z0-9_]*)\s+([^\)]+)\)\)", premises_blob[pos:])
+                if not_match:
+                    head = not_match.group(1)
+                    arg_blob = not_match.group(2).strip()
+                    args = [a for a in arg_blob.split() if a]
+                    premise_atoms.append((head, args, True))  # True = negated
+                    pos += not_match.end()
+                    continue
+
+                # Try to match (Predicate ...)
+                atom_match = re.match(r"\s*\(([A-Za-z][A-Za-z0-9_]*)\s+([^\)]+)\)", premises_blob[pos:])
+                if atom_match:
+                    head = atom_match.group(1)
+                    arg_blob = atom_match.group(2).strip()
+                    args = [a for a in arg_blob.split() if a]
+                    if args:  # Only add if we have args
+                        premise_atoms.append((head, args, False))  # False = not negated
+                    pos += atom_match.end()
+                    continue
+
+                # Skip this character
+                pos += 1
+
+            if not premise_atoms:
+                continue
+
+            # Build predicate -> patterns from existing facts
+            # e.g., "EatsFrequently abebe pasta" → pattern for EatsFrequently = [abebe, pasta]
+            fact_predicate_patterns: dict[str, List[str]] = {}
+            for fact in existing_facts:
+                m = re.match(r"\(([A-Za-z][A-Za-z0-9_]*)\s+(.+)\)", fact)
+                if m:
+                    pred = m.group(1)
+                    args = [a.strip() for a in m.group(2).split() if a.strip()]
+                    if pred not in fact_predicate_patterns:
+                        fact_predicate_patterns[pred] = args
+
+            # Bind variables based on patterns and tokens
+            all_grounded = True
+            for head, args, negated in premise_atoms:
+                for a in args:
+                    if a.startswith(("$", "?")):
+                        var_name = a[1:]  # strip $ or ?
+                        if a in bindings:
+                            continue  # already bound
+
+                        # Strategy 1: check tokens directly
+                        canonical_var = self.canonical_symbol(var_name, lemmatize=True)
+                        if canonical_var in tokens:
+                            bindings[a] = canonical_var
+                            continue
+
+                        # Strategy 2: check existing facts for matching predicate patterns
+                        if head in fact_predicate_patterns:
+                            patterns = fact_predicate_patterns[head]
+                            # Find position of variable in premise (0-indexed)
+                            var_pos = args.index(a) if a in args else -1
+                            if var_pos >= 0 and var_pos < len(patterns):
+                                entity = patterns[var_pos]
+                                if entity in tokens or self.canonical_symbol(entity) in tokens:
+                                    bindings[a] = entity
+                                    continue
+
+                        # Strategy 3: look for any entity in text that could fill this role
+                        for token in tokens:
+                            skip_words = (
+                                self.STOPWORDS
+                                | self.GENERIC_SORTALS
+                                | self._schema_alignment.generic_terms
+                                | {
+                                    "almost",
+                                    "any",
+                                    "each",
+                                    "every",
+                                    "many",
+                                    "much",
+                                    "only",
+                                }
+                            )
+                            if token.lower() in skip_words or len(token) < 3:
+                                continue
+                            # Check if this entity appears in any existing fact with this predicate
+                            for fact in existing_facts:
+                                if head in fact and token in fact:
+                                    bindings[a] = token
+                                    break
+                            if a in bindings:
+                                break
+
+                        if a not in bindings:
+                            all_grounded = False
+                    else:
+                        canon = self.canonical_symbol(a)
+                        if a != canon:
+                            bindings[a] = canon
+
+            if not all_grounded:
+                continue
+
+            # Check if all premise atoms are satisfied
+            premises_satisfied = True
+            for head, args, negated in premise_atoms:
+                bound_args = [bindings.get(a, self.canonical_symbol(a)) for a in args]
+                fact_atom = f"({head} {' '.join(bound_args)})"
+                if negated:
+                    if fact_atom not in negated_facts:
+                        premises_satisfied = False
+                        break
+                else:
+                    if fact_atom not in existing_facts:
+                        premises_satisfied = False
+                        break
+
+            if not premises_satisfied:
+                # Materialize premises (colleague's approach)
+                if not skip_materialization:
+                    for head, args, negated in premise_atoms:
+                        if negated:
+                            continue  # Don't materialize negated premises as positive facts
+                        bound_args = [bindings.get(a, self.canonical_symbol(a)) for a in args]
+                        fact_atom = f"({head} {' '.join(bound_args)})"
+                        fact_name = f"materialized_{self.canonical_symbol(head)}_fact"
+                        facts.append(f"(: {fact_name} {fact_atom} (STV 1.0 1.0))")
+                continue
+
+            # All premises satisfied → materialize conclusions
+            for conc_match in re.finditer(r"\(([A-Za-z][A-Za-z0-9_]*)\s+([^()]+?)\)", conclusions_blob):
+                conc_head = conc_match.group(1)
+                conc_args_raw = conc_match.group(2).strip()
+                conc_args = [a for a in conc_args_raw.split() if a]
+
+                bound_args = []
+                for a in conc_args:
+                    if a.startswith(("$", "?")):
+                        # Look up binding for this variable
+                        if a in bindings:
+                            bound_args.append(bindings[a])
+                        else:
+                            name = self.canonical_symbol(a[1:])
+                            if name in tokens:
+                                bound_args.append(name)
+                            else:
+                                bound_args = []
+                                break
+                    else:
+                        bound_args.append(self.canonical_symbol(a))
+
+                if bound_args:
+                    conc_atom = f"({conc_head} {' '.join(bound_args)})"
+                    if conc_atom not in existing_facts:
+                        conc_name = f"materialized_{self.canonical_symbol(conc_head)}_fact"
+                        facts.append(f"(: {conc_name} {conc_atom} (STV 1.0 1.0))")
+
+        return self.dedupe_preserve_order(facts)
 
     def dedupe_preserve_order(self, items: List[str]) -> List[str]:
         seen = set()

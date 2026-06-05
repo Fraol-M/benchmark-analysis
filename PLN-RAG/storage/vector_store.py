@@ -115,6 +115,34 @@ class VectorStore:
 
         return context, vector
 
+    def list_points(self, limit: int = 50) -> List[dict[str, Any]]:
+        """
+        Return raw Qdrant payloads for debugging.
+        Vectors are intentionally omitted because they are large and not useful
+        for normal inspection.
+        """
+        try:
+            resp = self._client.post(
+                f"{self._qdrant}/collections/{self._collection}/points/scroll",
+                json={
+                    "limit": limit,
+                    "with_payload": True,
+                    "with_vector": False,
+                },
+            )
+            if resp.status_code != 200:
+                return []
+            points = resp.json().get("result", {}).get("points", [])
+            return [
+                {
+                    "id": point.get("id"),
+                    "payload": point.get("payload", {}),
+                }
+                for point in points
+            ]
+        except Exception:
+            return []
+
     def reset(self):
         try:
             self._client.delete(f"{self._qdrant}/collections/{self._collection}")

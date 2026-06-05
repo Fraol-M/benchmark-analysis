@@ -1,54 +1,139 @@
-import dspy
+import re
 from typing import List
+
 from config import get_settings
 
 
-class _ProofToAnswer(dspy.Signature):
-    """
-    You are a helpful assistant. You are given a user's natural language
-    question and a logical proof trace from a Probabilistic Logic Network.
+SYSTEM_PROMPT = """You are a helpful assistant that answers questions based on logical proof traces.
 
-    Answer the question based strictly on the proof. If the proof is empty
-    or does not contain enough information, say you don't know.
-    Do not use any outside knowledge — only what the proof provides.
-    Translate technical PLN terms into plain language.
-    """
-    question: str = dspy.InputField(desc="The original question")
-    proof: str = dspy.InputField(desc="Raw PLN proof trace")
-    answer: str = dspy.OutputField(desc="Natural language answer")
+Answer only from the executed PLN target and proof trace.
+If the proof establishes the target, answer yes.
+If the proof establishes explicit negation of the target, answer no.
+If neither is present, say you do not know.
+Do not add domain knowledge that is not in the proof."""
 
 
 class AnswerGenerator:
     """
     Translates a PLN proof trace into a natural language response.
-    This is the only LLM call in the query path.
+
+    The primary path is deterministic: compare the executed query target against
+    proof atoms. LLM calls remain only as a fallback when no executed target was
+    supplied.
     """
 
     def __init__(self):
         cfg = get_settings()
-        if cfg.gemini_api_key:
-            lm = dspy.LM(
-                cfg.gemini_model,
-                api_key=cfg.gemini_api_key,
-                cache=False,
-            )
-        elif cfg.openai_api_key:
-            lm = dspy.LM(cfg.openai_model, api_key=cfg.openai_api_key, cache=False)
-        else:
-            raise ValueError(
-                "No LLM credentials found. Set GEMINI_API_KEY or OPENAI_API_KEY in your .env file."
-            )
-        dspy.configure(lm=lm, temperature=0.1, max_tokens=1000)
-        self._predict = dspy.Predict(_ProofToAnswer)
+        self._use_gemini = bool(cfg.gemini_api_key)
+        self._gemini_model = cfg.gemini_model
+        self._gemini_api_key = cfg.gemini_api_key
+        self._openai_api_key = cfg.openai_api_key
+        self._openai_model = cfg.openai_model
 
-    def generate(self, question: str, proof_traces: List[str]) -> str:
+    def generate(
+        self,
+        question: str,
+        proof_traces: List[str],
+        executed_query: str = "",
+    ) -> str:
         if not proof_traces:
-            return "I don't know — no proof was found for this question."
+            return "I don't know - no proof was found for this question."
+
+        target = self._extract_query_target(executed_query)
+        if target:
+            return self._answer_from_target(target, proof_traces)
 
         proof_str = "\n".join(proof_traces)
+        user_prompt = f"""Question: {question}
+
+Proof trace:
+{proof_str}
+
+Answer only from the proof trace. Do not add unstated domain knowledge."""
+
         try:
-            result = self._predict(question=question, proof=proof_str)
-            return result.answer
+            if self._use_gemini:
+                return self._call_gemini(user_prompt)
+            return self._call_openai(user_prompt)
         except Exception as e:
             print(f"[AnswerGenerator] Failed: {e}")
-            return "I was unable to generate an answer due to an internal error."
+            return self._fallback_answer(question, proof_traces, executed_query)
+
+    def _call_gemini(self, user_prompt: str) -> str:
+        try:
+            from google import genai
+            from google.genai import types
+
+            client = genai.Client(api_key=self._gemini_api_key)
+            response = client.models.generate_content(
+                model=self._gemini_model,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    temperature=0.1,
+                    max_output_tokens=1000,
+                ),
+            )
+            return response.text
+        except ImportError:
+            return self._call_openai(user_prompt)
+
+    def _call_openai(self, user_prompt: str) -> str:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=self._openai_api_key)
+        response = client.chat.completions.create(
+            model=self._openai_model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+            max_tokens=1000,
+        )
+        return response.choices[0].message.content
+
+    def _fallback_answer(
+        self,
+        question: str,
+        proof_traces: List[str],
+        executed_query: str = "",
+    ) -> str:
+        proof = " ".join(proof_traces)
+        if not proof:
+            return "I don't know - no proof was found for this question."
+
+        target = self._extract_query_target(executed_query)
+        if target:
+            return self._answer_from_target(target, proof_traces)
+
+        return f"I found a proof, but could not generate a fluent answer. Proof: {proof}"
+
+    def _answer_from_target(self, target: str, proof_traces: List[str]) -> str:
+        proof_atoms = [self._normalize_spaces(str(item)) for item in proof_traces]
+        target = self._normalize_spaces(target)
+        negated = f"(Not {target})"
+
+        if any(self._statement_contains_body(item, negated) for item in proof_atoms):
+            return f"No. The proof contains explicit negation of {target}."
+        if any(self._statement_contains_body(item, target) for item in proof_atoms):
+            return f"Yes. The proof establishes {target}."
+        return (
+            "I don't know. A proof was found, but it does not establish "
+            f"the executed target {target}."
+        )
+
+    def _extract_query_target(self, query: str) -> str:
+        match = re.fullmatch(
+            r"\(:\s+[$?][^\s]+\s+(\(.+\))\s+[$?][^\s]+\)",
+            self._normalize_spaces(query),
+        )
+        return self._normalize_spaces(match.group(1)) if match else ""
+
+    def _statement_contains_body(self, statement: str, body: str) -> bool:
+        return body in statement
+
+    def _normalize_spaces(self, text: str) -> str:
+        if not text:
+            return ""
+        return " ".join(str(text).split())

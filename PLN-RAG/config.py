@@ -19,12 +19,7 @@ class Settings(BaseSettings):
 
     # Gemini (uses Google's OpenAI-compatible endpoint)
     gemini_api_key: Optional[str] = None
-    gemini_model: str = "gemini/gemini-2.0-flash"
-
-    # Options: "nl2pln" | "canonical_pln" | "manhin" | "langextract"
-    parser: str = "canonical_pln"
-    nl2pln_module_path: str = "data/simba_all.json"
-    canonical_pln_nl2pln_module_path: str = "data/simba_canonical_pln.json"
+    gemini_model: str = "gemini/gemini-2.5-flash"
 
     # LangExtract parser (NL -> LangExtract objects -> canonical PLN)
     langextract_api_key: Optional[str] = None
@@ -46,7 +41,7 @@ class Settings(BaseSettings):
     # Atomspace persistence
     atomspace_path: str = "data/atomspace/kb.metta"
 
-    # FAISS predicate store (used by Manhin parser)
+    # FAISS predicate store (no longer used)
     faiss_path: str = "data/faiss"
 
     # Processing
@@ -63,6 +58,9 @@ class Settings(BaseSettings):
     query_alignment_enabled: bool = True
     query_alignment_top_k: int = 8
     query_alignment_min_score: float = 0.55
+    query_candidate_max_tries: int = 5
+    answer_generation_enabled: bool = True
+    source_lookup_max_atoms: int = 0
 
     model_config = ConfigDict(
         env_file=_ENV_FILE,

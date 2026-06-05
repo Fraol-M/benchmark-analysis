@@ -13,6 +13,12 @@ class IngestItemResult(BaseModel):
     atoms: List[str] = []
     status: Literal["success", "failed"]
     error: Optional[str] = None
+    chunk_count: int = 0
+    batch_count: int = 0
+    batch_sizes: List[int] = []
+    parser_calls: int = 0
+    rejected_count: int = 0
+    rejected_samples: List[str] = []
 
 
 class IngestResponse(BaseModel):
@@ -32,12 +38,22 @@ class QueryResponse(BaseModel):
     original_query: str
     executed_query: str
     query_source: Literal["qdrant_alignment", "parser", "none"] = "none"
-    alignment_used: bool = False
     fallback_used: bool
     query_status: Literal["well_aligned", "weakly_aligned", "malformed", "no_query"]
     raw_proof: str
     sources: List[str]       # NL sentences that contributed to the proof
     answer: str
+    qdrant_aligned_queries: List[str] = Field(default_factory=list)
+    execution_candidates: List[str] = Field(default_factory=list)
+    candidate_count: Optional[int] = None
+    candidate_count_tried: Optional[int] = None
+    executed_candidate_index: Optional[int] = None
+    retry_used: Optional[bool] = None
+    context_retrieval_seconds: Optional[float] = None
+    parse_query_seconds: Optional[float] = None
+    reasoning_seconds: Optional[float] = None
+    source_lookup_seconds: Optional[float] = None
+    answer_generation_seconds: Optional[float] = None
 
 
 #  Reset 
@@ -87,6 +103,7 @@ class DebugIngestChunkResult(BaseModel):
     langextract_postprocessed: LangExtractPostprocessed
     pln_canonicalized: List[str] = Field(default_factory=list)
     atomspace_added: List[str] = Field(default_factory=list)
+    schema_alignment: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class DebugIngestItemResult(BaseModel):
@@ -110,6 +127,7 @@ class DebugQueryResponse(BaseModel):
     context: List[str] = Field(default_factory=list)
     qdrant_matches: List[Dict[str, Any]] = Field(default_factory=list)
     qdrant_aligned_queries: List[str] = Field(default_factory=list)
+    execution_candidates: List[str] = Field(default_factory=list)
     langextract_postprocessed: LangExtractQueryPostprocessed
     pln_canonicalized_queries: List[str] = Field(default_factory=list)
     supporting_statements: List[str] = Field(default_factory=list)
@@ -120,3 +138,14 @@ class DebugQueryResponse(BaseModel):
     proof: str
     sources: List[str]
     answer: str
+
+
+class DebugQdrantPoint(BaseModel):
+    id: str | int
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class DebugQdrantResponse(BaseModel):
+    enabled: bool
+    count: int
+    points: List[DebugQdrantPoint] = Field(default_factory=list)

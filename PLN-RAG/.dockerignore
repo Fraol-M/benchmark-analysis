@@ -1,4 +1,6 @@
 .env
+.venv/
+venv/
 __pycache__/
 *.pyc
 *.pyo
@@ -6,3 +8,4 @@ __pycache__/
 data/atomspace/
 data/faiss/
 *.metta
+test_type_inference.py

@@ -43,6 +43,17 @@ STOPWORDS = {
     "why",
     "with",
 }
+GENERIC_INTENT_TERMS = {
+    "at",
+    "become",
+    "becoming",
+    "elevated",
+    "high",
+    "higher",
+    "low",
+    "lower",
+    "risk",
+}
 YES_NO_STARTERS = {
     "is",
     "are",
@@ -97,13 +108,14 @@ def build_aligned_queries(
 ) -> QueryAlignmentResult:
     question_entities = extract_question_entities(question)
     question_terms = extract_question_terms(question)
+    question_anchors = _question_anchor_terms(question_terms, question_entities)
     is_yes_no = _is_yes_no_question(question)
 
-    queries: list[str] = []
+    ranked_queries: list[tuple[float, str]] = []
     seen_queries: set[str] = set()
     debug_matches: list[dict[str, Any]] = []
 
-    for match in matches:
+    for match_index, match in enumerate(matches):
         targets = _targets_from_match(match)
         match_queries: list[str] = []
 
@@ -113,6 +125,7 @@ def build_aligned_queries(
                     expr,
                     question_entities=question_entities,
                     question_terms=question_terms,
+                    question_anchors=question_anchors,
                     is_yes_no=is_yes_no,
                 )
                 if grounded is None:
@@ -121,7 +134,18 @@ def build_aligned_queries(
                 if query in seen_queries:
                     continue
                 seen_queries.add(query)
-                queries.append(query)
+                ranked_queries.append(
+                    (
+                        _score_grounded_target(
+                            grounded,
+                            question_terms=question_terms,
+                            question_entities=question_entities,
+                            qdrant_score=float(match.get("score") or 0.0),
+                            match_index=match_index,
+                        ),
+                        query,
+                    )
+                )
                 match_queries.append(query)
 
         debug_matches.append(
@@ -134,7 +158,69 @@ def build_aligned_queries(
             }
         )
 
-    return QueryAlignmentResult(queries=queries, matches=debug_matches)
+    ranked_queries.sort(key=lambda item: item[0], reverse=True)
+    return QueryAlignmentResult(
+        queries=[query for _, query in ranked_queries],
+        matches=debug_matches,
+    )
+
+
+def filter_queries_by_question_intent(question: str, queries: Iterable[str]) -> list[str]:
+    """
+    Keep only answer targets that match the user's requested predicate/topic.
+
+    Qdrant retrieval is deliberately broad so it can supply supporting facts.
+    The final executable target should be narrower: a provable intermediate fact
+    should not answer a different question just because it came from the same
+    retrieved chunk.
+    """
+    question_entities = extract_question_entities(question)
+    question_terms = extract_question_terms(question)
+    question_anchors = _question_anchor_terms(question_terms, question_entities)
+    if not question_anchors:
+        return _dedupe_queries(queries)
+
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        clean = " ".join(str(query).split())
+        if not clean or clean in seen:
+            continue
+        target = _query_target_expr(clean)
+        if target is None:
+            continue
+        if _target_matches_question_intent(
+            target,
+            question_anchors=question_anchors,
+            question_entities=question_entities,
+        ):
+            seen.add(clean)
+            filtered.append(clean)
+    return filtered
+
+
+def extract_forward_seed_terms(matches: Iterable[dict[str, Any]]) -> list[str]:
+    """Extract grounded fact bodies from Qdrant matches for PeTTa forward chaining."""
+    seeds: list[str] = []
+    seen: set[str] = set()
+
+    for match in matches:
+        pln = match.get("pln") or []
+        if not isinstance(pln, list):
+            continue
+        for statement in pln:
+            for expr in _parse_sexprs(str(statement)):
+                payload = _statement_payload(expr)
+                if payload is None:
+                    continue
+                if _payload_is_rule(payload) or _variables(payload):
+                    continue
+                serialized = _serialize(payload)
+                if serialized and serialized not in seen:
+                    seen.add(serialized)
+                    seeds.append(serialized)
+
+    return seeds
 
 
 def extract_question_entities(question: str) -> list[str]:
@@ -157,7 +243,7 @@ def extract_question_terms(question: str) -> set[str]:
         canonical = _canonical_symbol(lowered)
         if canonical:
             terms.add(canonical)
-    return terms
+    return _expand_terms(terms)
 
 
 def _targets_from_match(match: dict[str, Any]) -> list[str]:
@@ -172,14 +258,11 @@ def _targets_from_match(match: dict[str, Any]) -> list[str]:
 
 
 def _targets_from_statement(expr: SExpr) -> list[SExpr]:
-    if not isinstance(expr, list) or len(expr) < 3 or expr[0] != ":":
+    payload = _statement_payload(expr)
+    if payload is None:
         return []
 
-    payload = expr[2]
-    if not isinstance(payload, list) or not payload:
-        return []
-
-    if payload[0] == "Implication":
+    if _payload_is_rule(payload):
         return [
             conclusion
             for conclusion in _extract_conclusions(payload)
@@ -215,23 +298,74 @@ def _ground_target(
     *,
     question_entities: list[str],
     question_terms: set[str],
+    question_anchors: set[str],
     is_yes_no: bool,
 ) -> SExpr | None:
     if not _is_query_target(expr):
         return None
 
-    if is_yes_no:
-        return None
-
     variables = sorted(_variables(expr))
+
+    # Grounded facts: query is fully grounded with question entities
     if not variables:
         constants = _constants(expr)
+        if question_entities and not set(question_entities).issubset(constants):
+            return None
         if question_terms and constants and not question_terms.intersection(constants):
+            head_terms = _predicate_terms(expr)
+            if not question_terms.intersection(head_terms):
+                return None
+        if not _target_matches_question_intent(
+            expr,
+            question_anchors=question_anchors,
+            question_entities=question_entities,
+        ):
             return None
         return expr
 
+    # Partial grounding: single variable + question entity → bind
     if len(variables) == 1 and len(question_entities) == 1:
-        return _replace_symbol(expr, variables[0], question_entities[0])
+        grounded = _replace_symbol(expr, variables[0], question_entities[0])
+        if not _grounded_contains_entities(grounded, question_entities):
+            return None
+        if not _target_matches_question_intent(
+            grounded,
+            question_anchors=question_anchors,
+            question_entities=question_entities,
+        ):
+            return None
+        return grounded
+
+    # Yes/no question with multiple variables but has question entities to ground
+    if is_yes_no and question_entities and variables:
+        # Ground as many variables as possible with question entities
+        result = expr
+        remaining_entities = list(question_entities)
+        for var in variables:
+            if remaining_entities:
+                result = _replace_symbol(result, var, remaining_entities[0])
+                remaining_entities = remaining_entities[1:]
+            else:
+                break
+        if not _constants(result):
+            return None
+        if not _grounded_contains_entities(result, question_entities):
+            return None
+        if not _target_matches_question_intent(
+            result,
+            question_anchors=question_anchors,
+            question_entities=question_entities,
+        ):
+            return None
+        return result
+
+    return None
+
+
+def _grounded_contains_entities(expr: SExpr, question_entities: list[str]) -> bool:
+    if not question_entities:
+        return True
+    return set(question_entities).issubset(_constants(expr))
 
 
 def _variables(expr: SExpr) -> set[str]:
@@ -254,6 +388,121 @@ def _constants(expr: SExpr, *, is_head: bool = True) -> set[str]:
     for index, item in enumerate(expr):
         constants.update(_constants(item, is_head=index == 0))
     return constants
+
+
+def _statement_payload(expr: SExpr) -> SExpr | None:
+    if not isinstance(expr, list) or len(expr) < 3 or expr[0] != ":":
+        return None
+    payload = expr[2]
+    if not isinstance(payload, list) or not payload:
+        return None
+    return payload
+
+
+def _payload_is_rule(expr: SExpr) -> bool:
+    return isinstance(expr, list) and bool(expr) and expr[0] == "Implication"
+
+
+def _predicate_terms(expr: SExpr) -> set[str]:
+    if not isinstance(expr, list) or not expr or not isinstance(expr[0], str):
+        return set()
+    head = _canonical_symbol(expr[0])
+    return _expand_terms({part for part in head.split("_") if part})
+
+
+def _target_terms(expr: SExpr, question_entities: list[str]) -> set[str]:
+    constants = _constants(expr) - set(question_entities)
+    return _predicate_terms(expr) | constants
+
+
+def _target_matches_question_intent(
+    expr: SExpr,
+    *,
+    question_anchors: set[str],
+    question_entities: list[str],
+) -> bool:
+    if not question_anchors:
+        return True
+    return bool(_target_terms(expr, question_entities).intersection(question_anchors))
+
+
+def _question_anchor_terms(
+    question_terms: set[str],
+    question_entities: list[str],
+) -> set[str]:
+    anchors = set(question_terms)
+    anchors.difference_update(question_entities)
+    anchors.difference_update(GENERIC_INTENT_TERMS)
+    return anchors or (set(question_terms) - set(question_entities))
+
+
+def _query_target_expr(query: str) -> SExpr | None:
+    roots = _parse_sexprs(query)
+    if len(roots) != 1:
+        return None
+    expr = roots[0]
+    if not isinstance(expr, list) or len(expr) < 3 or expr[0] != ":":
+        return None
+    target = expr[2]
+    return target if _is_query_target(target) else None
+
+
+def _dedupe_queries(queries: Iterable[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        clean = " ".join(str(query).split())
+        if clean and clean not in seen:
+            seen.add(clean)
+            result.append(clean)
+    return result
+
+
+def _score_grounded_target(
+    expr: SExpr,
+    *,
+    question_terms: set[str],
+    question_entities: list[str],
+    qdrant_score: float,
+    match_index: int,
+) -> float:
+    constants = _constants(expr)
+    head_terms = _predicate_terms(expr)
+    entity_fit = len(set(question_entities).intersection(constants))
+    head_overlap = len(question_terms.intersection(head_terms))
+    constant_overlap = len(question_terms.intersection(constants))
+    head = expr[0] if isinstance(expr, list) and expr else ""
+    structural_penalty = 12.0 if head in {"IsA"} else 0.0
+    return (
+        qdrant_score * 100.0
+        + entity_fit * 40.0
+        + head_overlap * 24.0
+        + constant_overlap * 6.0
+        - structural_penalty
+        - match_index * 0.01
+    )
+
+
+def _expand_terms(terms: set[str]) -> set[str]:
+    expanded = set(terms)
+    for term in list(terms):
+        if term.endswith("ing") and len(term) > 5:
+            base = term[:-3]
+            expanded.add(base)
+            expanded.add(base + "e")
+        if term.endswith("ed") and len(term) > 4:
+            expanded.add(term[:-2])
+        if term in {"carb", "carbs"}:
+            expanded.add("carbohydrate")
+        if term == "carbohydrate":
+            expanded.add("carb")
+        if term == "obese":
+            expanded.add("obesity")
+        if term == "obesity":
+            expanded.add("obese")
+        if term in {"high", "higher", "excessive"}:
+            expanded.update({"high", "higher", "excessive"})
+    return expanded
 
 
 def _replace_symbol(expr: SExpr, old: str, new: str) -> SExpr:

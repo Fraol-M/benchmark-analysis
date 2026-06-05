@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, List
+from dataclasses import dataclass, field
 
 from config import get_settings
 from core.langextract_chunker import LangExtractChunker
@@ -14,19 +15,23 @@ from core.langextract_pln import (
     translate_extractions_to_pln,
     translate_query_extractions_to_pln,
 )
-from core.parser import ParseResult, SemanticParser
 from core.pln_postprocessor import PLNPostprocessor
 
 
-class LangExtractPLNParser(SemanticParser):
+@dataclass
+class ParseResult:
+    """Result of parsing natural language into PLN."""
+    statements: List[str] = field(default_factory=list)
+    queries: List[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class LangExtractPLNParser:
     """
-    LangExtract-based phase-1 parser for PLN-RAG.
+    LangExtract-based parser for PLN-RAG.
 
     Pipeline:
         natural language -> LangExtract extraction objects -> PLN strings
-
-    This mirrors the standalone lang-extract project structure while skipping
-    Hyperon/MeTTa because PLN-RAG's phase 2 consumes PeTTa-style PLN directly.
     """
 
     def __init__(self):
@@ -112,6 +117,7 @@ class LangExtractPLNParser(SemanticParser):
                         for item in translated.rejected
                     ],
                     "canonicalization_context": translated.ctx,
+                    "schema_alignment": processed.alignment_decisions,
                 },
             )
         except Exception as exc:
@@ -154,6 +160,7 @@ class LangExtractPLNParser(SemanticParser):
                 "statement_sources": translated.statement_to_source,
             },
             "pln_canonicalized": processed.statements,
+            "schema_alignment": processed.alignment_decisions,
         }
 
     def parse_query(self, text: str, context: list[str]) -> ParseResult:
@@ -193,6 +200,7 @@ class LangExtractPLNParser(SemanticParser):
                         for item in translated.rejected
                     ],
                     "canonicalization_context": translated.ctx,
+                    "schema_alignment": processed.alignment_decisions,
                 },
             )
         except Exception as exc:
@@ -233,6 +241,7 @@ class LangExtractPLNParser(SemanticParser):
             },
             "pln_canonicalized": processed.queries,
             "supporting_statements": processed.statements,
+            "schema_alignment": processed.alignment_decisions,
         }
 
     def _extract(self, text: str, prompt: str, examples: list[Any]) -> list[Any]:
