@@ -108,6 +108,8 @@ if st.session_state.ingest_results is not None:
                     )
                 with st.expander("Schema alignment", expanded=False):
                     st.json(chunk.get("schema_alignment", []), expanded=False)
+                with st.expander("Predicate registry", expanded=False):
+                    st.json(chunk.get("predicate_registry", []), expanded=False)
                 with st.expander("Qdrant/parser context", expanded=False):
                     st.json(chunk.get("context", []), expanded=False)
 
@@ -241,7 +243,8 @@ if st.session_state.qdrant_results is not None:
     payload = st.session_state.qdrant_results
     st.caption(
         f"Qdrant enabled: {payload.get('enabled')} | "
-        f"stored points: {payload.get('count', 0)}"
+        f"chunk points: {payload.get('count', 0)} | "
+        f"predicate cards: {payload.get('predicate_count', 0)}"
     )
     for idx, point in enumerate(payload.get("points", []), start=1):
         point_payload = point.get("payload", {})
@@ -265,3 +268,11 @@ if st.session_state.qdrant_results is not None:
             st.json(point_payload.get("metadata", {}), expanded=False)
             st.markdown("**Raw point**")
             st.json(point, expanded=False)
+
+    st.subheader("Predicate Card Store")
+    for idx, point in enumerate(payload.get("predicate_points", []), start=1):
+        point_payload = point.get("payload", {})
+        label = point_payload.get("predicate", "unknown")
+        arity = point_payload.get("arity", "?")
+        with st.expander(f"Predicate {idx}: {label}/{arity}", expanded=False):
+            st.json(point_payload, expanded=False)

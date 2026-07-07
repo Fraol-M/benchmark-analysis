@@ -4,7 +4,7 @@ Unit test to verify the type inference fix works correctly.
 import sys
 sys.path.insert(0, '.')
 
-from core.pln_postprocessor import PLNPostprocessor
+from core.pln.postprocessor import PLNPostprocessor
 
 
 def test_extract_proper_name_map():

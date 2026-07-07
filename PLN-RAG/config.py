@@ -62,6 +62,19 @@ class Settings(BaseSettings):
     answer_generation_enabled: bool = True
     source_lookup_max_atoms: int = 0
 
+    # Predicate registry / mapping graph
+    predicate_registry_enabled: bool = True
+    predicate_registry_path: str = "data/predicate_registry.json"
+    predicate_mapping_enabled: bool = True
+    predicate_mapping_llm_enabled: bool = True
+    predicate_mapping_collection: str = "pln_rag_predicates"
+    predicate_mapping_top_k: int = 6
+    predicate_mapping_max_candidates: int = 6
+    predicate_mapping_min_score: float = 0.62
+    predicate_mapping_proof_threshold: float = 0.82
+    predicate_mapping_timeout: int = 20
+    predicate_mapping_total_timeout: int = 25
+
     model_config = ConfigDict(
         env_file=_ENV_FILE,
         env_file_encoding="utf-8",

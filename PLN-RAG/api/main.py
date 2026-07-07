@@ -11,7 +11,7 @@ from api.models import (
     DebugQueryRequest, DebugQueryResponse,
     DebugQdrantResponse,
 )
-from core.service import PLNRAGService
+from core.orchestration.service import PLNRAGService
 from parsers import LangExtractPLNParser
 
 _start_time = time.time()

@@ -7,12 +7,27 @@ stores facts in a PeTTaChainer atomspace, and answers questions via logical proo
 ## Architecture
 
 ```
-Text → Chunker → SemanticParser → PeTTaChainer (atomspace + reasoning) → AnswerGenerator → Response
-                      ↑
-              Qdrant context retrieval
-                      ↑
-           Ollama (runs on host machine)
+Text -> Chunker -> LangExtract -> PLN postprocessor -> PeTTaChainer -> Answer
+                                |                    ^
+                                v                    |
+                    Predicate cards -> Qdrant -> validated mapping graph
 ```
+
+### Dynamic predicate mapping
+
+Ingestion creates a predicate card for each fact, rule premise, and rule
+conclusion. Predicate cards include arity, argument types, source examples, and
+the originating atom. They are embedded in a separate Qdrant collection so new
+predicates can retrieve semantically similar predicates without a hardcoded
+domain synonym list.
+
+An LLM/NLI classifier proposes one typed relation: `exactMatch`,
+`source_implies_target`, `target_implies_source`, `broader`, `narrower`,
+`related`, `contradiction`, or `unrelated`. Deterministic validation checks
+arity, ordered argument types, relation allow-list, confidence threshold, and
+explicit negation conflicts. Only approved exact/directional entailment
+mappings become PeTTa bridge rules. Related mappings remain retrieval/debug
+metadata and cannot enter proofs.
 
 ## Prerequisites
 
@@ -226,6 +241,8 @@ cd ..
 
 cd PeTTaChainer && pip install -e . && cd ..
 
+For Docker builds, PeTTaChainer is pinned to commit `6b88df7c903705a38205709151cdd7549fd8d1b0`, which is a reachable ref on the current upstream repository.
+
 # 5. Install pln-rag deps
 pip install -r requirements.txt
 
@@ -273,8 +290,10 @@ ingest and query requests will fail with a connection refused error.
 | Path | Contents | Backed by |
 |------|----------|-----------|
 | `data/atomspace/kb.metta` locally, `/app/data/atomspace/kb.metta` in Docker | PLN atoms (facts + rules) | file, loaded on startup |
+| `data/predicate_registry.json` | Predicate cards and typed mapping graph | JSON file |
 | `data/faiss/` | Predicate embeddings (Manhin parser) | FAISS index files |
-| Qdrant volume | NL ↔ PLN sentence mappings | Docker volume |
+| Qdrant chunk collection | NL ↔ PLN chunk mappings | Docker volume |
+| Qdrant predicate collection | Embedded predicate cards | Docker volume |
 | `~/.ollama` | Embedding model weights | host machine |
 
 Data survives container restarts via the `pln_data` Docker volume.

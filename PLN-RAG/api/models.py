@@ -104,6 +104,7 @@ class DebugIngestChunkResult(BaseModel):
     pln_canonicalized: List[str] = Field(default_factory=list)
     atomspace_added: List[str] = Field(default_factory=list)
     schema_alignment: List[Dict[str, Any]] = Field(default_factory=list)
+    predicate_registry: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class DebugIngestItemResult(BaseModel):
@@ -149,3 +150,5 @@ class DebugQdrantResponse(BaseModel):
     enabled: bool
     count: int
     points: List[DebugQdrantPoint] = Field(default_factory=list)
+    predicate_count: int = 0
+    predicate_points: List[DebugQdrantPoint] = Field(default_factory=list)

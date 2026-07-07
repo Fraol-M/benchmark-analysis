@@ -5,9 +5,9 @@ from typing import Any, List
 from dataclasses import dataclass, field
 
 from config import get_settings
-from core.langextract_chunker import LangExtractChunker
-from core.langextract_examples import load_langextract_prompt_spec
-from core.langextract_pln import (
+from core.extraction.langextract_chunker import LangExtractChunker
+from core.extraction.langextract_examples import load_langextract_prompt_spec
+from core.extraction.langextract_pln import (
     build_pln_query,
     collect_predicate_heads,
     format_context_hint,
@@ -15,7 +15,13 @@ from core.langextract_pln import (
     translate_extractions_to_pln,
     translate_query_extractions_to_pln,
 )
-from core.pln_postprocessor import PLNPostprocessor
+from core.pln.postprocessor import PLNPostprocessor
+from core.pln.predicate_mapping import (
+    LLMPredicateRelationClassifier,
+    PredicateMappingEngine,
+)
+from core.pln.schema_alignment import PLNSchemaAligner
+from core.pln.predicate_registry import PredicateRegistry
 
 
 @dataclass
@@ -57,7 +63,49 @@ class LangExtractPLNParser:
         self._max_workers = cfg.langextract_max_workers
         self._skip_fuzzy = cfg.langextract_skip_fuzzy
         self._predicate_heads: list[str] = []
-        self._postprocessor = PLNPostprocessor()
+        predicate_registry = None
+        if cfg.predicate_registry_enabled:
+            schema_aligner = PLNSchemaAligner(PLNPostprocessor.STRUCTURAL_HEADS)
+            model_id_lower = str(cfg.langextract_model_id or "").lower()
+            mapping_gemini_key = cfg.gemini_api_key
+            mapping_openai_key = cfg.openai_api_key
+            if not mapping_gemini_key and "gemini" in model_id_lower:
+                mapping_gemini_key = cfg.langextract_api_key
+            if not mapping_openai_key and any(
+                marker in model_id_lower for marker in ("openai", "gpt")
+            ):
+                mapping_openai_key = cfg.langextract_api_key
+            classifier = LLMPredicateRelationClassifier(
+                enabled=(
+                    cfg.predicate_mapping_enabled
+                    and cfg.predicate_mapping_llm_enabled
+                ),
+                gemini_api_key=mapping_gemini_key,
+                gemini_model=cfg.gemini_model,
+                openai_api_key=mapping_openai_key,
+                openai_model=cfg.openai_model,
+                timeout_seconds=cfg.predicate_mapping_timeout,
+            )
+            mapping_engine = (
+                PredicateMappingEngine(
+                    classifier=classifier,
+                    proof_threshold=cfg.predicate_mapping_proof_threshold,
+                    retrieval_min_score=cfg.predicate_mapping_min_score,
+                    retrieval_top_k=cfg.predicate_mapping_top_k,
+                    max_candidates=cfg.predicate_mapping_max_candidates,
+                    total_timeout_seconds=cfg.predicate_mapping_total_timeout,
+                )
+                if cfg.predicate_mapping_enabled
+                else None
+            )
+            predicate_registry = PredicateRegistry(
+                path=cfg.predicate_registry_path,
+                schema_aligner=schema_aligner,
+                mapping_engine=mapping_engine,
+            )
+        self._postprocessor = PLNPostprocessor(
+            predicate_registry=predicate_registry,
+        )
 
         if not self._api_key and not self._model_url:
             raise ValueError(
@@ -74,8 +122,13 @@ class LangExtractPLNParser:
     def create_chunker(self) -> LangExtractChunker:
         return LangExtractChunker()
 
-    def reset(self) -> None:
+    def set_predicate_card_store(self, card_store) -> None:
+        self._postprocessor.set_predicate_card_store(card_store)
+
+    def reset(self, clear_registry: bool = False) -> None:
         self._predicate_heads = []
+        if clear_registry:
+            self._postprocessor.reset_registry()
 
     def parse(self, text: str, context: list[str]) -> ParseResult:
         try:
@@ -118,6 +171,7 @@ class LangExtractPLNParser:
                     ],
                     "canonicalization_context": translated.ctx,
                     "schema_alignment": processed.alignment_decisions,
+                    "predicate_registry": processed.registry_decisions,
                 },
             )
         except Exception as exc:
@@ -161,6 +215,7 @@ class LangExtractPLNParser:
             },
             "pln_canonicalized": processed.statements,
             "schema_alignment": processed.alignment_decisions,
+            "predicate_registry": processed.registry_decisions,
         }
 
     def parse_query(self, text: str, context: list[str]) -> ParseResult:
@@ -201,6 +256,7 @@ class LangExtractPLNParser:
                     ],
                     "canonicalization_context": translated.ctx,
                     "schema_alignment": processed.alignment_decisions,
+                    "predicate_registry": processed.registry_decisions,
                 },
             )
         except Exception as exc:
@@ -242,6 +298,7 @@ class LangExtractPLNParser:
             "pln_canonicalized": processed.queries,
             "supporting_statements": processed.statements,
             "schema_alignment": processed.alignment_decisions,
+            "predicate_registry": processed.registry_decisions,
         }
 
     def _extract(self, text: str, prompt: str, examples: list[Any]) -> list[Any]:
