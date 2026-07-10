@@ -1,17 +1,22 @@
 import asyncio
 import re
-import ast
 import time
-from typing import List, Tuple
+from typing import List
 
 from config import get_settings
-from core.extraction.chunker import Chunker
-from parsers.langextract_pln_parser import LangExtractPLNParser, ParseResult
+from parsers.langextract_pln_parser import LangExtractPLNParser
 from core.query.alignment import (
     build_aligned_queries,
     extract_forward_seed_terms,
     extract_query_targets,
     filter_queries_by_question_intent,
+)
+from core.senf import (
+    SENFBuilder,
+    IdentityGraphBuilder,
+    ExemplarScorer,
+    TransWeaveBuilder,
+    BridgeGenerator,
 )
 from core.reasoning.reasoner import Reasoner
 from core.answering.answer_generator import AnswerGenerator
@@ -44,6 +49,24 @@ class PLNRAGService:
         self._answer_gen = AnswerGenerator()
         self._context_top_k = cfg.context_top_k
         self._query_fallback_enabled = cfg.query_fallback_enabled
+        self._senf_enabled = bool(getattr(cfg, "senf_enabled", False))
+        self._senf_emit_bridges = bool(getattr(cfg, "senf_emit_bridges", False))
+        self._senf_recent_window = max(
+            0,
+            int(getattr(cfg, "senf_recent_window", 5) or 0),
+        )
+        self._senf_builder = SENFBuilder() if self._senf_enabled else None
+        self._exemplar_scorer = ExemplarScorer() if self._senf_enabled else None
+        self._identity_graph_builder = (
+            IdentityGraphBuilder() if self._senf_enabled else None
+        )
+        self._transweave_builder = (
+            TransWeaveBuilder() if self._senf_enabled else None
+        )
+        self._bridge_generator = (
+            BridgeGenerator() if self._senf_enabled else None
+        )
+        self._recent_senfs = []
 
     #  Ingest
 
@@ -95,6 +118,15 @@ class PLNRAGService:
 
                 # 4. Add to atomspace via reasoner
                 added = self._reasoner.add_statements(parse_result.statements)
+
+                senf_added = self._run_senf_layer(
+                    statements=parse_result.statements,
+                    chunk=chunk,
+                    metadata=parse_result.metadata,
+                )
+                if senf_added:
+                    added.extend(senf_added)
+                
                 all_atoms.extend(added)
 
                 # 5. Store in vector DB for future context retrieval
@@ -150,6 +182,14 @@ class PLNRAGService:
 
                 added = self._reasoner.add_statements(pln_canonicalized)
 
+                senf_added = self._run_senf_layer(
+                    statements=pln_canonicalized,
+                    chunk=chunk,
+                    metadata=debug_metadata,
+                )
+                if senf_added:
+                    added.extend(senf_added)
+
                 if added and self._vector_store:
                     self._vector_store.store(
                         chunk,
@@ -170,6 +210,17 @@ class PLNRAGService:
                         atomspace_added=added,
                         schema_alignment=schema_alignment,
                         predicate_registry=predicate_registry,
+                        senf=debug_metadata.get("senf"),
+                        identity_edges=debug_metadata.get("identity_edges", []),
+                        weaves=debug_metadata.get("weaves", []),
+                        senf_bridge_atoms=debug_metadata.get(
+                            "senf_bridge_atoms",
+                            [],
+                        ),
+                        senf_proof_effect=bool(
+                            debug_metadata.get("senf_proof_effect", False)
+                        ),
+                        senf_error=debug_metadata.get("senf_error"),
                     )
                 )
 
@@ -184,6 +235,66 @@ class PLNRAGService:
 
             traceback.print_exc()
             return DebugIngestItemResult(text=text, status="failed", error=str(e))
+
+    def _run_senf_layer(
+        self,
+        *,
+        statements: List[str],
+        chunk: str,
+        metadata: dict,
+    ) -> List[str]:
+        if not self._senf_enabled:
+            return []
+        try:
+            assert self._senf_builder is not None
+            assert self._exemplar_scorer is not None
+            assert self._identity_graph_builder is not None
+            assert self._transweave_builder is not None
+            senf = self._senf_builder.build(statements, chunk, metadata)
+            senf = self._exemplar_scorer.score(senf, chunk)
+            identity_edges = self._identity_graph_builder.build(
+                senf,
+                self._recent_senfs,
+            )
+            weaves = self._transweave_builder.build_local(
+                senf,
+                self._recent_senfs,
+            )
+            bridge_atoms: List[str] = []
+            added_bridges: List[str] = []
+            if self._senf_emit_bridges:
+                assert self._bridge_generator is not None
+                bridge_atoms = self._bridge_generator.generate(
+                    senf,
+                    identity_edges,
+                    weaves,
+                )
+                if bridge_atoms:
+                    added_bridges = self._reasoner.add_statements(bridge_atoms)
+
+            self._recent_senfs.append(senf)
+            if self._senf_recent_window:
+                self._recent_senfs = self._recent_senfs[-self._senf_recent_window :]
+
+            metadata.update(
+                {
+                    "senf": senf.to_dict(),
+                    "identity_edges": [edge.to_dict() for edge in identity_edges],
+                    "weaves": [weave.to_dict() for weave in weaves],
+                    "senf_bridge_atoms": bridge_atoms,
+                    "senf_proof_effect": bool(added_bridges),
+                }
+            )
+            return added_bridges
+        except Exception as exc:
+            metadata.update(
+                {
+                    "senf_error": str(exc),
+                    "senf_proof_effect": False,
+                }
+            )
+            print(f"[Service] SENF layer error: {exc}")
+            return []
 
     def _enrich_context(self, rag_context: List[str], max_atoms: int = 50) -> List[str]:
         """
@@ -670,6 +781,7 @@ class PLNRAGService:
         if scope in ("all", "atomspace"):
             self._reasoner.reset()
             self._parser.reset(clear_registry=scope == "all")
+            self._recent_senfs.clear()
         if scope in ("all", "vectordb") and self._vector_store:
             self._vector_store.reset()
 

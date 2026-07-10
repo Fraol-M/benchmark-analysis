@@ -83,6 +83,8 @@ class LangExtractPostprocessed(BaseModel):
     statements: List[str] = Field(default_factory=list)
     rejected: List[Dict[str, Any]] = Field(default_factory=list)
     canonicalization_context: Dict[str, Any] = Field(default_factory=dict)
+    mention_prepass: Dict[str, Any] = Field(default_factory=dict)
+    mention_prompt_hint: str = ""
     statement_sources: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 
 
@@ -90,6 +92,8 @@ class LangExtractQueryPostprocessed(BaseModel):
     queries: List[str] = Field(default_factory=list)
     rejected: List[Dict[str, Any]] = Field(default_factory=list)
     canonicalization_context: Dict[str, Any] = Field(default_factory=dict)
+    mention_prepass: Dict[str, Any] = Field(default_factory=dict)
+    mention_prompt_hint: str = ""
     query_sources: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 
 
@@ -105,6 +109,12 @@ class DebugIngestChunkResult(BaseModel):
     atomspace_added: List[str] = Field(default_factory=list)
     schema_alignment: List[Dict[str, Any]] = Field(default_factory=list)
     predicate_registry: List[Dict[str, Any]] = Field(default_factory=list)
+    senf: Optional[Dict[str, Any]] = None
+    identity_edges: List[Dict[str, Any]] = Field(default_factory=list)
+    weaves: List[Dict[str, Any]] = Field(default_factory=list)
+    senf_bridge_atoms: List[str] = Field(default_factory=list)
+    senf_proof_effect: bool = False
+    senf_error: Optional[str] = None
 
 
 class DebugIngestItemResult(BaseModel):

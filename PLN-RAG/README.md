@@ -7,11 +7,27 @@ stores facts in a PeTTaChainer atomspace, and answers questions via logical proo
 ## Architecture
 
 ```
-Text -> Chunker -> LangExtract -> PLN postprocessor -> PeTTaChainer -> Answer
-                                |                    ^
-                                v                    |
-                    Predicate cards -> Qdrant -> validated mapping graph
+Text -> Chunker -> mention prepass -> LangExtract -> PLN postprocessor -> PeTTaChainer -> Answer
+                                                 |                    ^
+                                                 v                    |
+                                     Predicate cards -> Qdrant -> validated mapping graph
+                                                 |
+                                                 v
+                                  optional SENF identity/exemplar metadata
 ```
+
+## Project layout
+
+| Path | Purpose |
+|------|---------|
+| `api/` | FastAPI routes and response/request models |
+| `core/` | Runtime pipeline: extraction, PLN cleanup, query planning, reasoning, answering, and optional SENF metadata |
+| `parsers/` | LangExtract parser integration |
+| `storage/` | Qdrant/Ollama vector store adapter |
+| `debug_ui/` | Streamlit inspection UI |
+| `tests/` | Automatic unit and safety tests |
+| `tests/manual/` | Manual experiments that may require live LLM/Ollama/Qdrant services |
+| `docs/` | Architecture notes, fix notes, and research references |
 
 ### Dynamic predicate mapping
 
@@ -177,7 +193,7 @@ Hyperon MeTTa runtime because the PLN-RAG reasoner consumes PeTTa-style PLN
 directly. Once LangExtract has produced PLN statements or queries, the existing
 reasoning phase is unchanged.
 
-The shared PLN postprocessor lives in `core/pln_postprocessor.py`. It performs
+The shared PLN postprocessor lives in `core/pln/postprocessor.py`. It performs
 the final reasoning-readiness pass for parser outputs: canonicalization,
 statement filtering, weak premise pruning, and query fallback/ranking.
 

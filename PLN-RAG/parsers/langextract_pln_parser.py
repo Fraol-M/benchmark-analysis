@@ -5,6 +5,7 @@ from typing import Any, List
 from dataclasses import dataclass, field
 
 from config import get_settings
+from core.discourse import MentionPrepass, MentionPrepassResult
 from core.extraction.langextract_chunker import LangExtractChunker
 from core.extraction.langextract_examples import load_langextract_prompt_spec
 from core.extraction.langextract_pln import (
@@ -62,6 +63,9 @@ class LangExtractPLNParser:
         self._extraction_passes = cfg.langextract_extraction_passes
         self._max_workers = cfg.langextract_max_workers
         self._skip_fuzzy = cfg.langextract_skip_fuzzy
+        self._mention_prepass = (
+            MentionPrepass() if cfg.mention_prepass_enabled else None
+        )
         self._predicate_heads: list[str] = []
         predicate_registry = None
         if cfg.predicate_registry_enabled:
@@ -132,10 +136,11 @@ class LangExtractPLNParser:
 
     def parse(self, text: str, context: list[str]) -> ParseResult:
         try:
+            mention_prepass = self._build_mention_prepass(text)
             prompt = self._statement_prompt + format_context_hint(
                 context,
                 self._predicate_heads,
-            )
+            ) + self._mention_hint(mention_prepass)
             extractions = self._extract(text, prompt, self._statement_examples)
             self._remember_predicates(collect_predicate_heads(extractions))
 
@@ -170,6 +175,7 @@ class LangExtractPLNParser:
                         for item in translated.rejected
                     ],
                     "canonicalization_context": translated.ctx,
+                    "mention_prepass": mention_prepass.to_dict(),
                     "schema_alignment": processed.alignment_decisions,
                     "predicate_registry": processed.registry_decisions,
                 },
@@ -179,10 +185,11 @@ class LangExtractPLNParser:
             return ParseResult()
 
     def debug_parse(self, text: str, context: list[str]) -> dict[str, Any]:
+        mention_prepass = self._build_mention_prepass(text)
         prompt = self._statement_prompt + format_context_hint(
             context,
             self._predicate_heads,
-        )
+        ) + self._mention_hint(mention_prepass)
         extractions = self._extract(text, prompt, self._statement_examples)
         self._remember_predicates(collect_predicate_heads(extractions))
 
@@ -211,6 +218,8 @@ class LangExtractPLNParser:
                     for item in translated.rejected
                 ],
                 "canonicalization_context": translated.ctx,
+                "mention_prepass": mention_prepass.to_dict(),
+                "mention_prompt_hint": self._mention_hint(mention_prepass).strip(),
                 "statement_sources": translated.statement_to_source,
             },
             "pln_canonicalized": processed.statements,
@@ -220,10 +229,11 @@ class LangExtractPLNParser:
 
     def parse_query(self, text: str, context: list[str]) -> ParseResult:
         try:
+            mention_prepass = self._build_mention_prepass(text)
             prompt = self._query_prompt + format_context_hint(
                 context,
                 self._predicate_heads,
-            )
+            ) + self._mention_hint(mention_prepass)
             extractions = self._extract(text, prompt, self._query_examples)
             translated = translate_query_extractions_to_pln(
                 extractions,
@@ -255,6 +265,7 @@ class LangExtractPLNParser:
                         for item in translated.rejected
                     ],
                     "canonicalization_context": translated.ctx,
+                    "mention_prepass": mention_prepass.to_dict(),
                     "schema_alignment": processed.alignment_decisions,
                     "predicate_registry": processed.registry_decisions,
                 },
@@ -264,10 +275,11 @@ class LangExtractPLNParser:
             return ParseResult()
 
     def debug_parse_query(self, text: str, context: list[str]) -> dict[str, Any]:
+        mention_prepass = self._build_mention_prepass(text)
         prompt = self._query_prompt + format_context_hint(
             context,
             self._predicate_heads,
-        )
+        ) + self._mention_hint(mention_prepass)
         extractions = self._extract(text, prompt, self._query_examples)
         translated = translate_query_extractions_to_pln(
             extractions,
@@ -293,6 +305,8 @@ class LangExtractPLNParser:
                     for item in translated.rejected
                 ],
                 "canonicalization_context": translated.ctx,
+                "mention_prepass": mention_prepass.to_dict(),
+                "mention_prompt_hint": self._mention_hint(mention_prepass).strip(),
                 "query_sources": translated.query_to_source,
             },
             "pln_canonicalized": processed.queries,
@@ -322,6 +336,14 @@ class LangExtractPLNParser:
         for head in heads:
             if head not in self._predicate_heads:
                 self._predicate_heads.append(head)
+
+    def _build_mention_prepass(self, text: str) -> MentionPrepassResult:
+        if not self._mention_prepass:
+            return MentionPrepassResult()
+        return self._mention_prepass.build(text)
+
+    def _mention_hint(self, result: MentionPrepassResult) -> str:
+        return result.prompt_hint()
 
 
 def _first_nonempty(*values: Any) -> str | None:

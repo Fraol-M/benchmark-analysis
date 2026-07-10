@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     langextract_max_workers: int = 1
     langextract_skip_fuzzy: bool = True
     langextract_chunk_size: Optional[int] = None
+    mention_prepass_enabled: bool = True
 
     # Vector store
     qdrant_url: str = "http://localhost:6333"
@@ -74,6 +75,12 @@ class Settings(BaseSettings):
     predicate_mapping_proof_threshold: float = 0.82
     predicate_mapping_timeout: int = 20
     predicate_mapping_total_timeout: int = 25
+
+    # SENF identity/exemplar layer. Disabled by default because it is currently
+    # diagnostic metadata, not a proof-safe bridge authority.
+    senf_enabled: bool = False
+    senf_emit_bridges: bool = False
+    senf_recent_window: int = 5
 
     model_config = ConfigDict(
         env_file=_ENV_FILE,

@@ -384,7 +384,11 @@ class LLMPredicateRelationClassifier:
             "target_implies_source, broader, narrower, related, "
             "contradiction, unrelated. Be conservative: topical similarity "
             "is not entailment. Preserve ordered arguments; argument_mapping "
-            "uses zero-based positions and must be identity for a direct bridge. "
+            "uses zero-based positions and must be identity for a direct bridge.\n"
+            "Examples of logical mappings:\n"
+            "- Action to State/Attribute: If source is an action (e.g., 'EatsLargeMeals') and target is a state (e.g., 'HasHighCalorieIntake'), the relation is 'exactMatch' or 'source_implies_target'.\n"
+            "- Semantic equivalence: 'UsesAutomobile' and 'DrivesCar' -> 'exactMatch'.\n"
+            "- Specific to General: 'EatsApple' to 'ConsumesFruit' -> 'narrower'.\n"
             "Return exactly one result per id as JSON: "
             '{"results":[{"id":0,"relation":"...","confidence":0.0,'
             '"argument_mapping":[0],"reason":"..."}]}.\nPAIRS:\n'

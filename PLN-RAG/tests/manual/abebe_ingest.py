@@ -1,4 +1,10 @@
 import asyncio
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
+
 from core.orchestration.service import PLNRAGService
 from parsers.langextract_pln_parser import LangExtractPLNParser
 

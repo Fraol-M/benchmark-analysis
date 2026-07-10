@@ -94,7 +94,7 @@ def infer_entity_types(self, statements: List[str], proper_name_map: dict[str, s
 
 ### Unit Tests (ALL PASS ✓)
 ```bash
-python test_type_inference.py
+python -m unittest tests.test_type_inference
 ```
 
 **Results:**
@@ -192,9 +192,9 @@ docker logs -f pln-rag-pln-rag-1
 
 ## Files Modified
 - `core/pln_postprocessor.py` - Fixed `infer_entity_types()` method
-- `test_type_inference.py` - Unit tests (all passing)
-- `TYPE_INFERENCE_FIX.md` - Original documentation
-- `TYPE_INFERENCE_FIX_COMPLETE.md` - This complete guide
+- `tests/test_type_inference.py` - Unit tests (all passing)
+- `docs/fixes/type_inference_fix.md` - Original documentation
+- `docs/fixes/type_inference_fix_complete.md` - This complete guide
 
 ## Key Insights
 1. **Proper names are lowercased** in PLN statements by the time they reach postprocessor
