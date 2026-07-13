@@ -136,7 +136,8 @@ def translate_extractions_to_pln(
 
         try:
             name, payload = _statement_payload_from_extraction(ext, index, ctx)
-            statement = f"(: {name} {payload} {truth_value})"
+            statement_truth_value = _truth_value_for_extraction(ext, truth_value)
+            statement = f"(: {name} {payload} {statement_truth_value})"
         except Exception as exc:
             result.rejected.append(TranslationReject(cls, text, str(exc)))
             continue
@@ -263,6 +264,9 @@ def is_safe_statement_extraction(ext: Any) -> tuple[bool, str]:
         if "arguments" in attrs and _has_free_variable(attrs["arguments"]):
             return False, f"free variable in 'arguments' for {cls}"
 
+    if cls == "negation" and _is_epistemic_negation_without_status(ext):
+        return False, "epistemic or classification absence cannot become direct negation"
+
     if cls == "rule":
         if not _has_nonempty(attrs, "head_predicate"):
             return False, "rule has empty head_predicate"
@@ -274,6 +278,48 @@ def is_safe_statement_extraction(ext: Any) -> tuple[bool, str]:
             return False, f"rule body unparseable: {exc}"
 
     return True, ""
+
+
+def _is_epistemic_negation_without_status(ext: Any) -> bool:
+    text = " ".join(_ext_text(ext).lower().split())
+    epistemic_markers = (
+        "no known ",
+        "not known ",
+        "not clinically classified",
+        "not been clinically classified",
+        "not classified",
+        "not been classified",
+        "not diagnosed",
+        "not been diagnosed",
+        "not reported",
+        "not been reported",
+        "no evidence",
+    )
+    if not any(marker in text for marker in epistemic_markers):
+        return False
+    attrs = _ext_attrs(ext)
+    predicate = str(attrs.get("predicate", "")).lower().replace("_", "-")
+    status_terms = {"known", "classified", "diagnosed", "reported", "evidence"}
+    return not any(term in predicate for term in status_terms)
+
+
+def _truth_value_for_extraction(ext: Any, default: str) -> str:
+    """Keep common hedges from becoming absolute PLN truth values."""
+    attrs = _ext_attrs(ext)
+    strength = attrs.get("strength")
+    confidence = attrs.get("confidence")
+    if strength is not None or confidence is not None:
+        try:
+            s = max(0.0, min(1.0, float(strength if strength is not None else 1.0)))
+            c = max(0.0, min(1.0, float(confidence if confidence is not None else 1.0)))
+            return f"(STV {s:.2f} {c:.2f})"
+        except (TypeError, ValueError):
+            return default
+
+    text = " ".join(_ext_text(ext).lower().split())
+    if any(marker in text for marker in ("tend to", "tends to", "likely to", "probably")):
+        return "(STV 0.70 0.80)"
+    return default
 
 
 def _statement_payload_from_extraction(

@@ -11,14 +11,14 @@ from core.query.alignment import (
     extract_query_targets,
     filter_queries_by_question_intent,
 )
-from core.senf import (
-    SENFBuilder,
-    IdentityGraphBuilder,
-    ExemplarScorer,
-    TransWeaveBuilder,
-    BridgeGenerator,
+from core.query.intent import (
+    QuestionIntent,
+    QuestionMode,
+    parse_question_intent,
+    query_intent_score,
+    query_matches_intent,
 )
-from core.reasoning.reasoner import Reasoner
+from core.reasoning.reasoner import ProofOutcome, Reasoner
 from core.answering.answer_generator import AnswerGenerator
 from storage.vector_store import VectorStore
 from api.models import (
@@ -49,24 +49,6 @@ class PLNRAGService:
         self._answer_gen = AnswerGenerator()
         self._context_top_k = cfg.context_top_k
         self._query_fallback_enabled = cfg.query_fallback_enabled
-        self._senf_enabled = bool(getattr(cfg, "senf_enabled", False))
-        self._senf_emit_bridges = bool(getattr(cfg, "senf_emit_bridges", False))
-        self._senf_recent_window = max(
-            0,
-            int(getattr(cfg, "senf_recent_window", 5) or 0),
-        )
-        self._senf_builder = SENFBuilder() if self._senf_enabled else None
-        self._exemplar_scorer = ExemplarScorer() if self._senf_enabled else None
-        self._identity_graph_builder = (
-            IdentityGraphBuilder() if self._senf_enabled else None
-        )
-        self._transweave_builder = (
-            TransWeaveBuilder() if self._senf_enabled else None
-        )
-        self._bridge_generator = (
-            BridgeGenerator() if self._senf_enabled else None
-        )
-        self._recent_senfs = []
 
     #  Ingest
 
@@ -117,15 +99,10 @@ class PLNRAGService:
                     continue
 
                 # 4. Add to atomspace via reasoner
-                added = self._reasoner.add_statements(parse_result.statements)
-
-                senf_added = self._run_senf_layer(
-                    statements=parse_result.statements,
-                    chunk=chunk,
-                    metadata=parse_result.metadata,
+                added = self._reasoner.add_statements(
+                    parse_result.statements,
+                    provenance=parse_result.metadata.get("statement_to_source", {}),
                 )
-                if senf_added:
-                    added.extend(senf_added)
                 
                 all_atoms.extend(added)
 
@@ -180,15 +157,10 @@ class PLNRAGService:
                     "predicate_registry": predicate_registry,
                 }
 
-                added = self._reasoner.add_statements(pln_canonicalized)
-
-                senf_added = self._run_senf_layer(
-                    statements=pln_canonicalized,
-                    chunk=chunk,
-                    metadata=debug_metadata,
+                added = self._reasoner.add_statements(
+                    pln_canonicalized,
+                    provenance=debug_metadata.get("statement_to_source", {}),
                 )
-                if senf_added:
-                    added.extend(senf_added)
 
                 if added and self._vector_store:
                     self._vector_store.store(
@@ -210,17 +182,6 @@ class PLNRAGService:
                         atomspace_added=added,
                         schema_alignment=schema_alignment,
                         predicate_registry=predicate_registry,
-                        senf=debug_metadata.get("senf"),
-                        identity_edges=debug_metadata.get("identity_edges", []),
-                        weaves=debug_metadata.get("weaves", []),
-                        senf_bridge_atoms=debug_metadata.get(
-                            "senf_bridge_atoms",
-                            [],
-                        ),
-                        senf_proof_effect=bool(
-                            debug_metadata.get("senf_proof_effect", False)
-                        ),
-                        senf_error=debug_metadata.get("senf_error"),
                     )
                 )
 
@@ -235,66 +196,6 @@ class PLNRAGService:
 
             traceback.print_exc()
             return DebugIngestItemResult(text=text, status="failed", error=str(e))
-
-    def _run_senf_layer(
-        self,
-        *,
-        statements: List[str],
-        chunk: str,
-        metadata: dict,
-    ) -> List[str]:
-        if not self._senf_enabled:
-            return []
-        try:
-            assert self._senf_builder is not None
-            assert self._exemplar_scorer is not None
-            assert self._identity_graph_builder is not None
-            assert self._transweave_builder is not None
-            senf = self._senf_builder.build(statements, chunk, metadata)
-            senf = self._exemplar_scorer.score(senf, chunk)
-            identity_edges = self._identity_graph_builder.build(
-                senf,
-                self._recent_senfs,
-            )
-            weaves = self._transweave_builder.build_local(
-                senf,
-                self._recent_senfs,
-            )
-            bridge_atoms: List[str] = []
-            added_bridges: List[str] = []
-            if self._senf_emit_bridges:
-                assert self._bridge_generator is not None
-                bridge_atoms = self._bridge_generator.generate(
-                    senf,
-                    identity_edges,
-                    weaves,
-                )
-                if bridge_atoms:
-                    added_bridges = self._reasoner.add_statements(bridge_atoms)
-
-            self._recent_senfs.append(senf)
-            if self._senf_recent_window:
-                self._recent_senfs = self._recent_senfs[-self._senf_recent_window :]
-
-            metadata.update(
-                {
-                    "senf": senf.to_dict(),
-                    "identity_edges": [edge.to_dict() for edge in identity_edges],
-                    "weaves": [weave.to_dict() for weave in weaves],
-                    "senf_bridge_atoms": bridge_atoms,
-                    "senf_proof_effect": bool(added_bridges),
-                }
-            )
-            return added_bridges
-        except Exception as exc:
-            metadata.update(
-                {
-                    "senf_error": str(exc),
-                    "senf_proof_effect": False,
-                }
-            )
-            print(f"[Service] SENF layer error: {exc}")
-            return []
 
     def _enrich_context(self, rag_context: List[str], max_atoms: int = 50) -> List[str]:
         """
@@ -350,37 +251,34 @@ class PLNRAGService:
     def _query_candidates(
         self,
         question: str,
-        qdrant_queries: List[str],
+        _qdrant_queries: List[str],
         parser_queries: List[str],
     ) -> List[tuple[str, str]]:
         entries: List[tuple[str, str]] = []
         seen: set[str] = set()
-        filtered_qdrant = filter_queries_by_question_intent(
-            question,
-            qdrant_queries,
-        )
+        intent = parse_question_intent(question)
         filtered_parser = filter_queries_by_question_intent(
             question,
             parser_queries,
         )
-        if parser_queries and not filtered_parser:
-            filtered_parser = parser_queries
-        if qdrant_queries and not filtered_qdrant and not parser_queries:
-            filtered_qdrant = qdrant_queries
-        for source, queries in (
-            ("qdrant_alignment", filtered_qdrant),
-            ("parser", filtered_parser),
-        ):
+        # Retrieval supplies context and vocabulary, never proof targets.
+        # A candidate rejected by the intent gate must not be restored.
+        for source, queries in (("parser", filtered_parser),):
             for query in queries:
                 clean = " ".join(str(query).split())
-                if not clean or clean in seen:
+                if not clean or clean in seen or not query_matches_intent(intent, clean):
                     continue
                 seen.add(clean)
                 entries.append((clean, source))
+        entries.sort(
+            key=lambda item: query_intent_score(intent, item[0]),
+            reverse=True,
+        )
         return entries
 
     async def query(self, question: str) -> QueryResponse:
         cfg = get_settings()
+        intent = parse_question_intent(question)
         # 1. Retrieve context for translation
         t0 = time.perf_counter()
         if self._vector_store:
@@ -417,6 +315,35 @@ class PLNRAGService:
             qdrant_queries,
             parse_result.queries,
         )
+        if intent.mode in {QuestionMode.FACTORS, QuestionMode.SUFFICIENCY}:
+            requirements = self._reasoner.explain_requirements(
+                set(intent.terms),
+                entity=intent.entities[0] if intent.entities else "",
+                direction=intent.direction,
+            )
+            answer = self._answer_structured_intent(intent, requirements)
+            return QueryResponse(
+                question=question,
+                pln_query="",
+                original_query=original_query,
+                executed_query="",
+                query_source="none",
+                fallback_used=False,
+                query_status="well_aligned" if requirements else "weakly_aligned",
+                raw_proof="",
+                sources=[],
+                answer=answer,
+                qdrant_aligned_queries=qdrant_queries,
+                execution_candidates=[],
+                intent_mode=intent.mode.value,
+                proof_status="unanswered",
+                requirements=requirements,
+                context_retrieval_seconds=round(context_retrieval_seconds, 4),
+                parse_query_seconds=round(parse_query_seconds, 4),
+                reasoning_seconds=0.0,
+                source_lookup_seconds=0.0,
+                answer_generation_seconds=0.0,
+            )
         if not candidate_entries:
             return QueryResponse(
                 question=question,
@@ -431,6 +358,8 @@ class PLNRAGService:
                 answer="I couldn't translate this question into a logical query.",
                 qdrant_aligned_queries=qdrant_queries,
                 execution_candidates=[],
+                intent_mode=intent.mode.value,
+                proof_status="unanswered",
                 context_retrieval_seconds=round(context_retrieval_seconds, 4),
                 parse_query_seconds=round(parse_query_seconds, 4),
                 reasoning_seconds=0.0,
@@ -438,13 +367,11 @@ class PLNRAGService:
                 answer_generation_seconds=0.0,
             )
 
-        # 3. Add any supporting statements the parser generated for the query
-        if parse_result.statements:
-            self._reasoner.add_statements(parse_result.statements)
-
-        # 4. Run reasoning via PeTTaChainer against ordered candidates
+        # 3. Run reasoning read-only via PeTTaChainer against ordered candidates
         t2 = time.perf_counter()
         proof_traces: List[str] = []
+        proof_outcome = ProofOutcome()
+        first_outcome: ProofOutcome | None = None
         executed_query = ""
         executed_source = "none"
         candidates = (
@@ -465,8 +392,14 @@ class PLNRAGService:
             executed_query = candidate
             executed_source = source
             executed_candidate_index = idx
-            proof_traces = self._reasoner.query(candidate, seed_terms=seed_terms)
-            if proof_traces:
+            proof_outcome = self._reasoner.query_polarity(
+                candidate,
+                seed_terms=seed_terms,
+            )
+            if first_outcome is None:
+                first_outcome = proof_outcome
+            proof_traces = proof_outcome.proof
+            if proof_outcome.status != "unknown":
                 break
 
         if not proof_traces and hasattr(self._parser, "retry_parse_query"):
@@ -475,10 +408,18 @@ class PLNRAGService:
                 retry_result = retry(question, context, executed_query)
                 if retry_result and retry_result.queries:
                     retry_used = True
+                    validated_retry = [
+                        candidate
+                        for candidate, _source in self._query_candidates(
+                            question,
+                            [],
+                            retry_result.queries,
+                        )
+                    ]
                     more = (
-                        retry_result.queries
+                        validated_retry
                         if self._query_fallback_enabled
-                        else retry_result.queries[:1]
+                        else validated_retry[:1]
                     )
                     candidate_count_total += len(more)
                     if self._query_fallback_enabled and max_tries > 0:
@@ -491,11 +432,12 @@ class PLNRAGService:
                         executed_query = candidate
                         executed_source = "parser"
                         executed_candidate_index = idx
-                        proof_traces = self._reasoner.query(
+                        proof_outcome = self._reasoner.query_polarity(
                             candidate,
                             seed_terms=seed_terms,
                         )
-                        if proof_traces:
+                        proof_traces = proof_outcome.proof
+                        if proof_outcome.status != "unknown":
                             break
             except Exception as exc:
                 print(f"[Service] retry_parse_query failed: {exc}")
@@ -503,10 +445,19 @@ class PLNRAGService:
         if not proof_traces and candidates:
             executed_query, executed_source = candidates[0]
             executed_candidate_index = 0
+            proof_outcome = first_outcome or ProofOutcome(
+                positive_query=executed_query,
+                negative_query=self._reasoner.negated_query(executed_query),
+            )
 
         reasoning_seconds = time.perf_counter() - t2
 
-        raw_proof = str(proof_traces)
+        raw_proof = str(
+            {
+                "positive": proof_outcome.positive_proof,
+                "negative": proof_outcome.negative_proof,
+            }
+        )
         fallback_used = bool(
             executed_source == "parser"
             and executed_query
@@ -521,20 +472,30 @@ class PLNRAGService:
 
         # 5. Reverse-lookup NL sources from proof atoms
         t3 = time.perf_counter()
-        sources: List[str] = []
-        if cfg.source_lookup_max_atoms > 0:
-            sources = self._extract_sources(
-                proof_traces, max_atoms=cfg.source_lookup_max_atoms
-            )
+        sources = self._extract_sources(
+            proof_traces, max_atoms=cfg.source_lookup_max_atoms
+        )
         source_lookup_seconds = time.perf_counter() - t3
 
         # 6. Generate natural language answer
         t4 = time.perf_counter()
-        if cfg.answer_generation_enabled:
-            answer = self._answer_gen.generate(
+        requirements: List[dict] = []
+        if intent.mode == QuestionMode.EXPLANATION:
+            requirements = self._reasoner.explain_requirements(
+                set(intent.terms),
+                entity=intent.entities[0] if intent.entities else "",
+                direction=intent.direction,
+            )
+        if requirements:
+            answer = self._answer_structured_intent(intent, requirements)
+            answer_generation_seconds = time.perf_counter() - t4
+        elif cfg.answer_generation_enabled:
+            answer = self._answer_gen.generate_from_polarity(
                 question,
-                proof_traces,
-                executed_query=executed_query,
+                executed_query,
+                proof_outcome.status,
+                proof_outcome.positive_proof,
+                proof_outcome.negative_proof,
             )
             answer_generation_seconds = time.perf_counter() - t4
         else:
@@ -568,10 +529,17 @@ class PLNRAGService:
             reasoning_seconds=round(reasoning_seconds, 4),
             source_lookup_seconds=round(source_lookup_seconds, 4),
             answer_generation_seconds=round(answer_generation_seconds, 4),
+            intent_mode=intent.mode.value,
+            proof_status=proof_outcome.status,
+            negative_query=proof_outcome.negative_query,
+            positive_proof=proof_outcome.positive_proof,
+            negative_proof=proof_outcome.negative_proof,
+            requirements=requirements,
         )
 
     async def debug_query(self, question: str) -> DebugQueryResponse:
         cfg = get_settings()
+        intent = parse_question_intent(question)
         if self._vector_store:
             context, qdrant_matches = self._qdrant_context_with_matches(
                 question,
@@ -597,9 +565,6 @@ class PLNRAGService:
         pln_candidates = debug_info.get("pln_canonicalized", [])
         supporting_statements = debug_info.get("supporting_statements", [])
 
-        if supporting_statements:
-            self._reasoner.add_statements(supporting_statements)
-
         original_query = pln_candidates[0] if pln_candidates else (
             qdrant_queries[0] if qdrant_queries else ""
         )
@@ -608,6 +573,34 @@ class PLNRAGService:
             qdrant_queries,
             pln_candidates,
         )
+        if intent.mode in {QuestionMode.FACTORS, QuestionMode.SUFFICIENCY}:
+            requirements = self._reasoner.explain_requirements(
+                set(intent.terms),
+                entity=intent.entities[0] if intent.entities else "",
+                direction=intent.direction,
+            )
+            return DebugQueryResponse(
+                question=question,
+                context=context,
+                qdrant_matches=qdrant_matches,
+                qdrant_aligned_queries=qdrant_queries,
+                execution_candidates=[],
+                langextract_postprocessed=LangExtractQueryPostprocessed(
+                    **langextract_info
+                ),
+                pln_canonicalized_queries=pln_candidates,
+                supporting_statements=supporting_statements,
+                executed_query="",
+                query_source="none",
+                fallback_used=False,
+                query_status="well_aligned" if requirements else "weakly_aligned",
+                proof="",
+                sources=[],
+                answer=self._answer_structured_intent(intent, requirements),
+                intent_mode=intent.mode.value,
+                proof_status="unanswered",
+                requirements=requirements,
+            )
         if not candidate_entries:
             return DebugQueryResponse(
                 question=question,
@@ -627,6 +620,8 @@ class PLNRAGService:
                 proof="",
                 sources=[],
                 answer="I couldn't translate this question into a logical query.",
+                intent_mode=intent.mode.value,
+                proof_status="unanswered",
             )
 
         candidates = (
@@ -641,15 +636,27 @@ class PLNRAGService:
         executed_query = ""
         executed_source = "none"
         proof_traces: List[str] = []
+        proof_outcome = ProofOutcome()
+        first_outcome: ProofOutcome | None = None
         for candidate, source in candidates:
             executed_query = candidate
             executed_source = source
-            proof_traces = self._reasoner.query(candidate, seed_terms=seed_terms)
-            if proof_traces:
+            proof_outcome = self._reasoner.query_polarity(
+                candidate,
+                seed_terms=seed_terms,
+            )
+            if first_outcome is None:
+                first_outcome = proof_outcome
+            proof_traces = proof_outcome.proof
+            if proof_outcome.status != "unknown":
                 break
 
         if not proof_traces and candidates:
             executed_query, executed_source = candidates[0]
+            proof_outcome = first_outcome or ProofOutcome(
+                positive_query=executed_query,
+                negative_query=self._reasoner.negated_query(executed_query),
+            )
 
         fallback_used = bool(
             executed_source == "parser"
@@ -662,16 +669,25 @@ class PLNRAGService:
             executed_query or original_query,
             fallback_used,
         )
-        sources: List[str] = []
-        if cfg.source_lookup_max_atoms > 0:
-            sources = self._extract_sources(
-                proof_traces, max_atoms=cfg.source_lookup_max_atoms
+        sources = self._extract_sources(
+            proof_traces, max_atoms=cfg.source_lookup_max_atoms
+        )
+        requirements: List[dict] = []
+        if intent.mode == QuestionMode.EXPLANATION:
+            requirements = self._reasoner.explain_requirements(
+                set(intent.terms),
+                entity=intent.entities[0] if intent.entities else "",
+                direction=intent.direction,
             )
-        if cfg.answer_generation_enabled:
-            answer = self._answer_gen.generate(
+        if requirements:
+            answer = self._answer_structured_intent(intent, requirements)
+        elif cfg.answer_generation_enabled:
+            answer = self._answer_gen.generate_from_polarity(
                 question,
-                proof_traces,
-                executed_query=executed_query,
+                executed_query,
+                proof_outcome.status,
+                proof_outcome.positive_proof,
+                proof_outcome.negative_proof,
             )
         else:
             answer = ""
@@ -696,10 +712,74 @@ class PLNRAGService:
             query_source=executed_source,
             fallback_used=fallback_used,
             query_status=query_status,
-            proof=str(proof_traces),
+            proof=str(
+                {
+                    "positive": proof_outcome.positive_proof,
+                    "negative": proof_outcome.negative_proof,
+                }
+            ),
             sources=sources,
             answer=answer,
+            intent_mode=intent.mode.value,
+            proof_status=proof_outcome.status,
+            negative_query=proof_outcome.negative_query,
+            positive_proof=proof_outcome.positive_proof,
+            negative_proof=proof_outcome.negative_proof,
+            requirements=requirements,
         )
+
+    def _answer_structured_intent(
+        self,
+        intent: QuestionIntent,
+        explanations: List[dict],
+    ) -> str:
+        if intent.mode == QuestionMode.SUFFICIENCY:
+            if not explanations:
+                return (
+                    "The knowledge base does not establish that the stated cause alone is "
+                    "sufficient. A related fact is not a proof of causal sufficiency."
+                )
+            atoms = self._requirement_atoms(explanations)
+            additional = [atom for atom, status in atoms if status != "positive"]
+            if additional:
+                return (
+                    "No proof establishes sufficiency from that condition alone. "
+                    "The relevant rules also require: " + ", ".join(additional[:8]) + "."
+                )
+            return (
+                "The relevant rule requirements are proved, but this planner does not treat "
+                "that as proof that the named condition alone is sufficient."
+            )
+
+        if not explanations:
+            return "No proof-backed factors matching this question were found in the rules."
+        atoms = self._requirement_atoms(explanations)
+        if not atoms:
+            return "Relevant rules were found, but they contain no inspectable factor premises."
+        rendered = ", ".join(f"{atom} [{status}]" for atom, status in atoms[:12])
+        if intent.mode == QuestionMode.EXPLANATION:
+            return "The proof rules depend on these requirements: " + rendered + "."
+        return "The relevant rules identify these requirements: " + rendered + "."
+
+    def _requirement_atoms(self, explanations: List[dict]) -> List[tuple[str, str]]:
+        atoms: List[tuple[str, str]] = []
+        seen: set[str] = set()
+
+        def visit(item: dict) -> None:
+            atom = str(item.get("atom", ""))
+            if atom and atom not in seen:
+                seen.add(atom)
+                atoms.append((atom, str(item.get("status", "unknown"))))
+            for key in ("children", "options"):
+                for child in item.get(key, []) or []:
+                    if isinstance(child, dict):
+                        visit(child)
+
+        for explanation in explanations:
+            for requirement in explanation.get("requirements", []) or []:
+                if isinstance(requirement, dict):
+                    visit(requirement)
+        return atoms
 
     def _classify_query_status(
         self, question: str, original_query: str, fallback_used: bool
@@ -740,6 +820,9 @@ class PLNRAGService:
         Extract atom names from proof traces and reverse-lookup
         their NL source sentences from the vector store.
         """
+        exact_sources = self._reasoner.sources_for_proof(proof_traces)
+        if exact_sources:
+            return exact_sources
         if max_atoms <= 0:
             return []
 
@@ -781,7 +864,6 @@ class PLNRAGService:
         if scope in ("all", "atomspace"):
             self._reasoner.reset()
             self._parser.reset(clear_registry=scope == "all")
-            self._recent_senfs.clear()
         if scope in ("all", "vectordb") and self._vector_store:
             self._vector_store.reset()
 

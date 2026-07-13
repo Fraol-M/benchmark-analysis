@@ -59,6 +59,26 @@ Answer only from the proof trace. Do not add unstated domain knowledge."""
             print(f"[AnswerGenerator] Failed: {e}")
             return self._fallback_answer(question, proof_traces, executed_query)
 
+    def generate_from_polarity(
+        self,
+        question: str,
+        executed_query: str,
+        status: str,
+        positive_proof: List[str],
+        negative_proof: List[str],
+    ) -> str:
+        target = self._extract_query_target(executed_query) or "the requested proposition"
+        if status == "both":
+            return (
+                f"The knowledge base is contradictory: it proves both {target} "
+                "and its explicit negation."
+            )
+        if status == "positive":
+            return f"Yes. The proof establishes {target}."
+        if status == "negative":
+            return f"No. The proof establishes explicit negation of {target}."
+        return "I don't know - neither the proposition nor its explicit negation was proved."
+
     def _call_gemini(self, user_prompt: str) -> str:
         try:
             from google import genai

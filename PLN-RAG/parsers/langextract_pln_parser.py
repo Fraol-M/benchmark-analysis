@@ -220,7 +220,11 @@ class LangExtractPLNParser:
                 "canonicalization_context": translated.ctx,
                 "mention_prepass": mention_prepass.to_dict(),
                 "mention_prompt_hint": self._mention_hint(mention_prepass).strip(),
-                "statement_sources": translated.statement_to_source,
+                "statement_sources": _remap_metadata(
+                    translated.statements,
+                    processed.statements,
+                    translated.statement_to_source,
+                ),
             },
             "pln_canonicalized": processed.statements,
             "schema_alignment": processed.alignment_decisions,

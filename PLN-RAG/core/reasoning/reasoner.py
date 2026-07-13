@@ -1,11 +1,26 @@
 import os
+import json
 import re
 import threading
+from dataclasses import dataclass, field
 from typing import Any, List
 from config import get_settings
 from core.pln.symbol_normalization import canonical_symbol
 
 from pettachainer.pettachainer import PeTTaChainer
+
+
+@dataclass
+class ProofOutcome:
+    status: str = "unknown"
+    positive_query: str = ""
+    negative_query: str = ""
+    positive_proof: List[str] = field(default_factory=list)
+    negative_proof: List[str] = field(default_factory=list)
+
+    @property
+    def proof(self) -> List[str]:
+        return self.positive_proof + self.negative_proof
 
 
 class Reasoner:
@@ -23,6 +38,7 @@ class Reasoner:
     def __init__(self):
         cfg = get_settings()
         self._atomspace_path = cfg.atomspace_path
+        self._provenance_path = f"{cfg.atomspace_path}.provenance.jsonl"
         self._query_timeout = cfg.chaining_timeout
         self._max_steps = cfg.chaining_max_steps
         self._lock = threading.Lock()
@@ -45,20 +61,36 @@ class Reasoner:
                         print(f"[Reasoner] Warning: skipping atom '{atom}': {e}")
         print("[Reasoner] Atomspace loaded.")
 
-    def add_statements(self, statements: List[str]) -> List[str]:
+    def add_statements(
+        self,
+        statements: List[str],
+        provenance: dict[str, dict[str, Any]] | None = None,
+    ) -> List[str]:
         """
         Add parsed MeTTa statements to the atomspace and persist them.
         Returns the list of successfully added atoms.
         """
         added = []
+        provenance = provenance or {}
         with self._lock:
-            with open(self._atomspace_path, "a", encoding="utf-8") as f:
+            with open(self._atomspace_path, "a", encoding="utf-8") as f, open(
+                self._provenance_path, "a", encoding="utf-8"
+            ) as provenance_file:
                 for stmt in statements:
                     clean = " ".join(stmt.split())
                     try:
                         self._handler.add_atom(clean)
                         f.write(clean + "\n")
                         added.append(clean)
+                        source = provenance.get(stmt) or provenance.get(clean)
+                        if source:
+                            provenance_file.write(
+                                json.dumps(
+                                    {"atom": clean, "source": source},
+                                    ensure_ascii=True,
+                                )
+                                + "\n"
+                            )
                     except Exception as e:
                         print(f"[Reasoner] Failed to add atom '{clean}': {e}")
         return added
@@ -86,6 +118,138 @@ class Reasoner:
         except Exception as e:
             print(f"[Reasoner] Query failed for '{pln_query}': {e}")
         return self._backward_chain(pln_query)
+
+    def query_polarity(
+        self,
+        pln_query: str,
+        seed_terms: List[str] | None = None,
+    ) -> ProofOutcome:
+        """Check a grounded proposition and its explicit negation."""
+        negative_query = self.negated_query(pln_query)
+        positive = self.query(pln_query, seed_terms=seed_terms)
+        negative = self.query(negative_query, seed_terms=seed_terms) if negative_query else []
+        if positive and negative:
+            status = "both"
+        elif positive:
+            status = "positive"
+        elif negative:
+            status = "negative"
+        else:
+            status = "unknown"
+        return ProofOutcome(
+            status=status,
+            positive_query=pln_query,
+            negative_query=negative_query,
+            positive_proof=positive,
+            negative_proof=negative,
+        )
+
+    def negated_query(self, pln_query: str) -> str:
+        target = self._extract_grounded_query_atom(pln_query)
+        if not target or target.startswith("(Not "):
+            return ""
+        return f"(: $prf (Not {target}) $tv)"
+
+    def explain_requirements(
+        self,
+        terms: set[str],
+        entity: str = "",
+        direction: str = "",
+    ) -> List[dict[str, Any]]:
+        """Return source-rule requirements relevant to an explanatory question."""
+        explanations: List[dict[str, Any]] = []
+        terms = {canonical_symbol(term) for term in terms if canonical_symbol(term)}
+        generic_terms = {
+            "factor", "reason", "increase", "decrease", "reduce", "lower",
+            "cause", "lead", "risk", "sufficient", "alone",
+        }
+        domain_terms = set(terms) - generic_terms
+        for rule in self._extract_rules(self.get_atoms()):
+            for conclusion in rule["conclusions"]:
+                if not isinstance(conclusion, list) or not conclusion:
+                    continue
+                head_terms = self._head_terms(str(conclusion[0]))
+                if not head_terms.intersection(terms):
+                    continue
+                head_domain_terms = head_terms - generic_terms
+                if domain_terms and not head_domain_terms.intersection(domain_terms):
+                    continue
+                if direction == "reduce" and not head_terms.intersection(
+                    {"reduce", "decrease", "lower", "prevent", "protect", "mitigate"}
+                ):
+                    continue
+                bindings: dict[str, str] = {}
+                if entity:
+                    for arg in conclusion[1:]:
+                        if self._is_variable(arg):
+                            bindings[str(arg)] = entity
+                grounded_target = self._apply_bindings_expr(conclusion, bindings)
+                requirements = [
+                    self._requirement_record(premise, bindings)
+                    for premise in rule["premises"]
+                ]
+                explanations.append(
+                    {
+                        "target": self._serialize_expr(grounded_target),
+                        "rule": rule["raw"],
+                        "requirements": requirements,
+                    }
+                )
+        return explanations
+
+    def _requirement_record(self, premise: Any, bindings: dict) -> dict[str, Any]:
+        grounded = self._apply_bindings_expr(premise, bindings)
+        if isinstance(grounded, list) and grounded:
+            head = str(grounded[0])
+            if head in {"And", "and", "Premises"}:
+                children = [self._requirement_record(item, bindings) for item in grounded[1:]]
+                return {
+                    "kind": "and",
+                    "status": "positive" if all(item["status"] == "positive" for item in children) else "unknown",
+                    "children": children,
+                }
+            if head in {"Or", "or"}:
+                options = [self._requirement_record(item, bindings) for item in grounded[1:]]
+                statuses = {item["status"] for item in options}
+                status = "positive" if "positive" in statuses else (
+                    "negative" if statuses == {"negative"} else "unknown"
+                )
+                return {"kind": "or", "status": status, "options": options}
+
+        atom = self._serialize_expr(grounded)
+        query = f"(: $prf {atom} $tv)"
+        if atom.startswith("(Not "):
+            proof = self.query(query)
+            status = "positive" if proof else "unknown"
+        else:
+            positive = self.query(query)
+            negative_query = self.negated_query(query)
+            if negative_query and hasattr(self, "_atomspace_path"):
+                negative = self._query_exact_fact(negative_query)
+            elif negative_query:
+                negative = self.query(negative_query)
+            else:
+                negative = []
+            if positive and negative:
+                status = "both"
+            elif positive:
+                status = "positive"
+            elif negative:
+                status = "negative"
+            else:
+                status = "unknown"
+        return {"kind": "literal", "atom": atom, "status": status}
+
+    def _head_terms(self, head: str) -> set[str]:
+        spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", head)
+        terms = {
+            canonical_symbol(part)
+            for part in re.split(r"[^A-Za-z0-9]+", spaced)
+            if part
+        }
+        if "increas" in terms:
+            terms.add("increase")
+        return terms
 
     def _forward_chain_from_seed_terms(self, seed_terms: List[str]) -> bool:
         available = self._available_seed_terms(seed_terms)
@@ -210,6 +374,8 @@ class Reasoner:
             self._background_files = set()
             if os.path.exists(self._atomspace_path):
                 os.remove(self._atomspace_path)
+            if os.path.exists(self._provenance_path):
+                os.remove(self._provenance_path)
         print("[Reasoner] Atomspace reset.")
 
     @property
@@ -229,6 +395,28 @@ class Reasoner:
         if pattern:
             return [atom for atom in atoms if pattern in atom]
         return atoms
+
+    def sources_for_proof(self, proof_traces: List[str]) -> List[str]:
+        """Resolve proof atoms to exact extraction spans recorded at ingestion."""
+        if not os.path.exists(self._provenance_path):
+            return []
+        proof_atoms = {" ".join(str(item).split()) for item in proof_traces}
+        sources: List[str] = []
+        seen: set[str] = set()
+        with open(self._provenance_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if record.get("atom") not in proof_atoms:
+                    continue
+                source = record.get("source") or {}
+                text = str(source.get("text", "")).strip()
+                if text and text not in seen:
+                    seen.add(text)
+                    sources.append(text)
+        return sources
 
     def _parse_sexpr(self, text: str) -> List[Any]:
         """Parse S-expression into nested list."""
@@ -402,6 +590,31 @@ class Reasoner:
         bindings: dict,
         seen: set,
     ) -> List[tuple[dict, List[str]]]:
+        if isinstance(premise, list) and premise:
+            head = premise[0]
+            if head in {"Or", "or"}:
+                alternatives: List[tuple[dict, List[str]]] = []
+                for option in premise[1:]:
+                    alternatives.extend(
+                        self._prove_premise(option, dict(bindings), set(seen))
+                    )
+                return alternatives[:20]
+            if head in {"And", "and"}:
+                states: List[tuple[dict, List[str]]] = [(dict(bindings), [])]
+                for child in premise[1:]:
+                    next_states: List[tuple[dict, List[str]]] = []
+                    for state_bindings, state_proofs in states:
+                        for updated, proofs in self._prove_premise(
+                            child,
+                            state_bindings,
+                            seen,
+                        ):
+                            next_states.append((updated, state_proofs + proofs))
+                    if not next_states:
+                        return []
+                    states = next_states[:20]
+                return states
+
         partially_grounded = self._apply_bindings_expr(premise, bindings)
         if not self._variables(partially_grounded):
             proof = self._prove_grounded_premise(partially_grounded, seen)

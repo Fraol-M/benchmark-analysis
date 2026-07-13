@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     langextract_extraction_passes: int = 1
     langextract_max_workers: int = 1
     langextract_skip_fuzzy: bool = True
-    langextract_chunk_size: Optional[int] = None
+    langextract_chunk_size: Optional[int] = 2000
     mention_prepass_enabled: bool = True
 
     # Vector store
@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     faiss_path: str = "data/faiss"
 
     # Processing
-    chunk_size: int = 512  # chars per chunk
+    chunk_size: int = 2000  # chars per chunk
     chunk_overlap: int = 64  # overlap between chunks
     context_top_k: int = 10  # atoms to retrieve as parser context
 
@@ -73,14 +73,8 @@ class Settings(BaseSettings):
     predicate_mapping_max_candidates: int = 6
     predicate_mapping_min_score: float = 0.62
     predicate_mapping_proof_threshold: float = 0.82
-    predicate_mapping_timeout: int = 20
-    predicate_mapping_total_timeout: int = 25
-
-    # SENF identity/exemplar layer. Disabled by default because it is currently
-    # diagnostic metadata, not a proof-safe bridge authority.
-    senf_enabled: bool = False
-    senf_emit_bridges: bool = False
-    senf_recent_window: int = 5
+    predicate_mapping_timeout: int = 12
+    predicate_mapping_total_timeout: int = 30
 
     model_config = ConfigDict(
         env_file=_ENV_FILE,

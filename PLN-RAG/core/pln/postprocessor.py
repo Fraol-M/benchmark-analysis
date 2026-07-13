@@ -116,23 +116,32 @@ class PLNPostprocessor:
             processed_queries,
             property_predicates,
         )
+        processed_statements = self.repair_portion_size_fact_arity(
+            processed_statements
+        )
+        processed_statements = [
+            self.repair_missing_universal_variable(stmt)
+            for stmt in processed_statements
+        ]
+        processed_statements, arity_decisions = self.enforce_predicate_arities(
+            processed_statements,
+            context,
+        )
+        registry_decisions.extend(arity_decisions)
 
         if self._predicate_registry and not plan_queries:
-            processed_statements, registry_decisions = (
+            processed_statements, alignment_registry_decisions = (
                 self._predicate_registry.align_statements(
                     statements=processed_statements,
                     context=context,
                     source_text=text,
                 )
             )
+            registry_decisions.extend(alignment_registry_decisions)
 
         processed_statements = [
             self.prune_generic_sortal_premises(stmt) for stmt in processed_statements
         ]
-
-        # Materialize grounded premise facts (colleague's approach)
-        materialized = self._materialize_grounded_premise_facts(text, processed_statements)
-        processed_statements.extend(materialized)
 
         # Infer types for proper names that appear in statements
         inferred_types = self.infer_entity_types(processed_statements, proper_name_map)
@@ -302,6 +311,176 @@ class PLNPostprocessor:
                 "(: " + entity + "_is_person (IsA " + entity + " person) (STV 1.0 1.0))"
             )
         return inferred
+
+    def repair_portion_size_fact_arity(self, statements: List[str]) -> List[str]:
+        """
+        Replace a unary portion-size fact when extraction emitted one
+        fact but the same subject has an explicit eating fact with an object.
+
+        Example:
+          (EatsFrequently abebe pasta) + (EatsLargePortions abebe)
+          -> (EatsLargePortions abebe pasta)
+
+        Keeping both arities would create an unstable predicate schema, so the
+        repair is applied only when exactly one food object is recoverable.
+        """
+        eating_objects_by_subject: dict[str, list[str]] = {}
+        existing_atoms: set[str] = set()
+
+        repaired_statements: List[str] = []
+        for statement in statements:
+            repaired = statement
+            for head, args in self._simple_fact_atoms(statement):
+                atom = f"({head} {' '.join(args)})"
+                existing_atoms.add(atom)
+                if head in {"Eats", "EatsFrequently"} and len(args) >= 2:
+                    eating_objects_by_subject.setdefault(args[0], [])
+                    if args[1] not in eating_objects_by_subject[args[0]]:
+                        eating_objects_by_subject[args[0]].append(args[1])
+
+        for statement in statements:
+            repaired = statement
+            for head, args in self._simple_fact_atoms(statement):
+                if not self._is_portion_size_head(head) or len(args) != 1:
+                    continue
+                subject = args[0]
+                objects = eating_objects_by_subject.get(subject, [])
+                if len(objects) != 1:
+                    continue
+                repaired_atom = f"({head} {subject} {objects[0]})"
+                repaired = re.sub(
+                    rf"\({re.escape(head)}\s+{re.escape(subject)}\)",
+                    repaired_atom,
+                    repaired,
+                    count=1,
+                )
+                existing_atoms.add(repaired_atom)
+            repaired_statements.append(repaired)
+
+        return self.dedupe_preserve_order(repaired_statements)
+
+    def _simple_fact_atoms(self, statement: str) -> List[tuple[str, List[str]]]:
+        if "Implication" in statement or "(Not " in statement:
+            return []
+        atoms: List[tuple[str, List[str]]] = []
+        for match in re.finditer(
+            r"\(([A-Z][A-Za-z0-9_]*)\s+([^()]+?)\)\s+\(STV",
+            statement,
+        ):
+            head = match.group(1)
+            if head in self.STRUCTURAL_HEADS:
+                continue
+            args = [arg for arg in match.group(2).split() if arg]
+            if args:
+                atoms.append((head, args))
+        return atoms
+
+    def _is_portion_size_head(self, head: str) -> bool:
+        return bool(
+            re.search(r"(Large|Small|Moderate|Huge|Tiny)Portions$", head)
+        )
+
+    def repair_missing_universal_variable(self, statement: str) -> str:
+        """
+        Repair generic person rules where extraction dropped the universal variable.
+
+        Example:
+          (Premises (IsA person) (Obese)) (Conclusions (AtRisk))
+          -> (Premises (IsA $x person) (Obese $x)) (Conclusions (AtRisk $x))
+
+        This is intentionally narrow: it only fires for implication rules that
+        contain the malformed generic sortal marker `(IsA person)`.
+        """
+        clean = " ".join(str(statement).split())
+        if "Implication" not in clean:
+            return statement
+        if not re.search(r"\(IsA\s+(person|people|human|individual)\)", clean):
+            return statement
+
+        repaired = re.sub(
+            r"\(IsA\s+(person|people|human|individual)\)",
+            r"(IsA $x \1)",
+            clean,
+        )
+
+        def add_variable(match: re.Match[str]) -> str:
+            head = match.group(1)
+            if head in self.STRUCTURAL_HEADS:
+                return match.group(0)
+            return f"({head} $x)"
+
+        return re.sub(r"\(([A-Z][A-Za-z0-9_]*)\)", add_variable, repaired)
+
+    def enforce_predicate_arities(
+        self,
+        statements: List[str],
+        context: List[str],
+    ) -> tuple[List[str], List[dict]]:
+        """Reject uses that conflict with an established predicate schema."""
+        expected: dict[str, set[int]] = {}
+
+        def collect(items: List[str], include_rules: bool = True) -> List[dict]:
+            signatures: List[dict] = []
+            for item in items:
+                signatures.extend(self._schema_alignment.extract_fact_signatures(item))
+                signatures.extend(self._schema_alignment.extract_negated_fact_signatures(item))
+                if include_rules:
+                    signatures.extend(self._schema_alignment.extract_conclusion_signatures(item))
+                    signatures.extend(
+                        self._schema_alignment.collect_premise_signatures(
+                            [item], origin="arity_validation"
+                        )
+                    )
+            return signatures
+
+        for signature in collect(context):
+            expected.setdefault(signature["head"], set()).add(signature["arity"])
+
+        rule_signatures: List[dict] = []
+        for statement in statements:
+            if "Implication" not in statement:
+                continue
+            rule_signatures.extend(self._schema_alignment.extract_conclusion_signatures(statement))
+            rule_signatures.extend(
+                self._schema_alignment.collect_premise_signatures(
+                    [statement], origin="arity_validation"
+                )
+            )
+        for signature in rule_signatures:
+            if signature["head"] not in expected:
+                expected.setdefault(signature["head"], set()).add(signature["arity"])
+
+        stable_expected = {
+            head: next(iter(arities))
+            for head, arities in expected.items()
+            if len(arities) == 1
+        }
+        kept: List[str] = []
+        decisions: List[dict] = []
+        for statement in statements:
+            conflicts = []
+            for signature in collect([statement]):
+                arity = stable_expected.get(signature["head"])
+                if arity is not None and signature["arity"] != arity:
+                    conflicts.append(
+                        {
+                            "predicate": signature["head"],
+                            "expected_arity": arity,
+                            "actual_arity": signature["arity"],
+                        }
+                    )
+            if conflicts:
+                decisions.append(
+                    {
+                        "status": "rejected",
+                        "reason": "predicate_arity_conflict",
+                        "statement": statement,
+                        "conflicts": conflicts,
+                    }
+                )
+                continue
+            kept.append(statement)
+        return kept, decisions
 
     def pluralize(self, word: str) -> str:
         if word.endswith("y") and len(word) > 2:
@@ -1068,6 +1247,10 @@ class PLNPostprocessor:
           Fact: EatsFrequently(abebe, pasta) exists
           → materializes (ConsumesExcessiveCarbs abebe) directly.
         """
+        # Retained temporarily for compatibility with external callers. Premise
+        # invention is proof-unsafe and this method must never emit atoms.
+        return []
+
         normalized = self.normalize_text(text)
         # Skip materialization for purely definitional rules
         conditional_phrases = (" indicate ", " indicates ", " implies ",

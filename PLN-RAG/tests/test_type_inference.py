@@ -57,6 +57,9 @@ class TypeInferenceTests(unittest.TestCase):
         self.assertTrue(
             any("IsA abebe person" in item for item in result.statements)
         )
+        self.assertTrue(
+            any("EatsLargePortions abebe pasta" in item for item in result.statements)
+        )
 
     def test_rule_requiring_person_type_gets_supporting_facts(self):
         postprocessor = PLNPostprocessor()
@@ -81,7 +84,7 @@ class TypeInferenceTests(unittest.TestCase):
         self.assertTrue(
             any("IsA abebe person" in item for item in result.statements)
         )
-        self.assertTrue(
+        self.assertFalse(
             any("IsA pasta pasta" in item for item in result.statements)
         )
         self.assertTrue(

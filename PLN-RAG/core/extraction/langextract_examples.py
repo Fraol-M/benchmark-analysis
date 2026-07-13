@@ -7,6 +7,19 @@ from pathlib import Path
 from typing import Any
 
 
+PROOF_SAFETY_PROMPT = """
+
+Proof-safety rules:
+- Preserve epistemic status: not known, not reported, not diagnosed, and not
+  classified are not direct negations of the underlying property. Negate a
+  status predicate such as clinically-classified-as-obese instead.
+- Preserve hedging. For rules containing tend to, likely, or probably, include
+  numeric strength and confidence attributes below 1.0.
+- Never invent a premise, conclusion, entity, or relation that is not supported
+  by an exact source span.
+"""
+
+
 @dataclass(frozen=True)
 class LangExtractPromptSpec:
     statement_prompt: str
@@ -34,7 +47,7 @@ def load_langextract_prompt_spec(path: str | None = None) -> LangExtractPromptSp
         payload = json.load(handle)
 
     return LangExtractPromptSpec(
-        statement_prompt=str(payload["statement_prompt"]),
+        statement_prompt=str(payload["statement_prompt"]) + PROOF_SAFETY_PROMPT,
         query_prompt=str(payload["query_prompt"]),
         statement_examples=_build_examples(lx, payload.get("statement_examples", [])),
         query_examples=_build_examples(lx, payload.get("query_examples", [])),

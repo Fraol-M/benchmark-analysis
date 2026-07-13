@@ -66,9 +66,19 @@ COPY --from=builder /usr/local/lib/python3.10/dist-packages /usr/local/lib/pytho
 
 # Clone PeTTa and PeTTaChainer
 WORKDIR /deps
-RUN git clone https://github.com/trueagi-io/PeTTa.git && \
+RUN git config --global http.version HTTP/1.1 && \
+    git config --global http.postBuffer 524288000 && \
+    for attempt in 1 2 3; do \
+        git clone --filter=blob:none https://github.com/trueagi-io/PeTTa.git && break; \
+        rm -rf /deps/PeTTa; \
+        sleep 5; \
+    done && \
     git -C /deps/PeTTa checkout ${PETTA_COMMIT} && \
-    git clone https://github.com/rTreutlein/PeTTaChainer.git && \
+    for attempt in 1 2 3; do \
+        git clone --filter=blob:none https://github.com/rTreutlein/PeTTaChainer.git && break; \
+        rm -rf /deps/PeTTaChainer; \
+        sleep 5; \
+    done && \
     git -C /deps/PeTTaChainer checkout ${PETTACHAINER_COMMIT}
 
 # Install PeTTa — strip the janus-swi pip dep, then point PYTHONPATH

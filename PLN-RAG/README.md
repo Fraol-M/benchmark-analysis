@@ -11,9 +11,6 @@ Text -> Chunker -> mention prepass -> LangExtract -> PLN postprocessor -> PeTTaC
                                                  |                    ^
                                                  v                    |
                                      Predicate cards -> Qdrant -> validated mapping graph
-                                                 |
-                                                 v
-                                  optional SENF identity/exemplar metadata
 ```
 
 ## Project layout
@@ -21,7 +18,7 @@ Text -> Chunker -> mention prepass -> LangExtract -> PLN postprocessor -> PeTTaC
 | Path | Purpose |
 |------|---------|
 | `api/` | FastAPI routes and response/request models |
-| `core/` | Runtime pipeline: extraction, PLN cleanup, query planning, reasoning, answering, and optional SENF metadata |
+| `core/` | Runtime pipeline: extraction, PLN cleanup, query planning, reasoning, and answering |
 | `parsers/` | LangExtract parser integration |
 | `storage/` | Qdrant/Ollama vector store adapter |
 | `debug_ui/` | Streamlit inspection UI |
@@ -178,10 +175,19 @@ The `langextract` parser follows a direct PLN-RAG path:
 ```text
 Natural language
 -> LangExtract-style chunker
+-> mention prepass
 -> LangExtract extraction objects
--> source-aware canonical PLN statements/queries
--> shared PLN postprocessor
+-> proof-safety and predicate-schema validation
+-> source-aware canonical PLN statements
 -> PeTTaChainer
+
+Question
+-> typed intent (boolean/open/factors/explanation/sufficiency)
+-> Qdrant context and vocabulary retrieval
+-> parser query candidates
+-> intent and arity gate
+-> positive and explicit-negative proof checks
+-> proof-backed answer and exact source provenance
 ```
 
 It mirrors the useful parts of the standalone `lang-extract` project inside
@@ -190,12 +196,14 @@ canonicalization, fuzzy/unsafe extraction rejection, predicate vocabulary reuse
 across chunks, source metadata for translated statements, and the same shared
 PLN postprocessor used by the canonical parser. It intentionally skips the
 Hyperon MeTTa runtime because the PLN-RAG reasoner consumes PeTTa-style PLN
-directly. Once LangExtract has produced PLN statements or queries, the existing
-reasoning phase is unchanged.
+directly. Qdrant retrieval is context-only: retrieved atoms are not executable
+query targets. Query and debug-query operations are read-only and cannot add
+evidence to the atomspace.
 
 The shared PLN postprocessor lives in `core/pln/postprocessor.py`. It performs
 the final reasoning-readiness pass for parser outputs: canonicalization,
-statement filtering, weak premise pruning, and query fallback/ranking.
+statement filtering, weak premise pruning, portion-arity repair, conflicting
+arity rejection, and query planning. It never materializes missing rule premises.
 
 Query fallback execution can be toggled independently at runtime:
 
@@ -203,8 +211,10 @@ Query fallback execution can be toggled independently at runtime:
 QUERY_FALLBACK_ENABLED=true
 ```
 
-When disabled, the service runs only the original generated query. When enabled,
-it may try later fallback candidates produced by the parser.
+When disabled, the service runs only the first validated parser query. When
+enabled, it may try later parser candidates, but every retry passes through the
+same typed intent gate. Boolean queries return one of four proof states:
+`positive`, `negative`, `both`, or `unknown`.
 
 To add a new parser:
 1. Create `parsers/your_parser.py` implementing `SemanticParser`

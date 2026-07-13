@@ -234,6 +234,8 @@ class PredicateCardBuilder:
 class LLMPredicateRelationClassifier:
     """Classify predicate relationships; never decides proof safety itself."""
 
+    GEMINI_MIN_TIMEOUT_SECONDS = 10
+
     def __init__(
         self,
         *,
@@ -249,7 +251,7 @@ class LLMPredicateRelationClassifier:
         self.gemini_model = _strip_provider_prefix(gemini_model)
         self.openai_api_key = openai_api_key
         self.openai_model = _strip_provider_prefix(openai_model)
-        self.timeout_seconds = max(1, int(timeout_seconds))
+        self.timeout_seconds = max(self.GEMINI_MIN_TIMEOUT_SECONDS, int(timeout_seconds))
 
     @property
     def available(self) -> bool:
@@ -290,6 +292,8 @@ class LLMPredicateRelationClassifier:
                 1,
                 min(self.timeout_seconds, int(timeout_seconds)),
             )
+        if self.gemini_api_key and request_timeout < self.GEMINI_MIN_TIMEOUT_SECONDS:
+            return proposals
         try:
             if self.gemini_api_key:
                 raw_response = self._call_gemini(prompt, request_timeout)

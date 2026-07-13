@@ -66,7 +66,7 @@ if st.button("Run debug ingest", key="run_ingest_btn"):
             resp = httpx.post(
                 f"{api_base}/debug/ingest",
                 json={"texts": texts},
-                timeout=180,  # Increased to 3 minutes for long texts
+                timeout=420,  # Long LangExtract/Gemini calls can exceed 3 minutes.
             )
             resp.raise_for_status()
             payload = resp.json()
@@ -131,7 +131,7 @@ if run_query:
             resp = httpx.post(
                 f"{api_base}/debug/query",
                 json={"question": question},
-                timeout=120,  # Increased to 2 minutes for complex queries
+                timeout=240,  # Complex parsing/reasoning can be slow on dense text.
             )
             resp.raise_for_status()
             payload = resp.json()

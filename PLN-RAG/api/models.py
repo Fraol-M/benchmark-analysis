@@ -54,6 +54,12 @@ class QueryResponse(BaseModel):
     reasoning_seconds: Optional[float] = None
     source_lookup_seconds: Optional[float] = None
     answer_generation_seconds: Optional[float] = None
+    intent_mode: Literal["boolean", "open", "factors", "explanation", "sufficiency"] = "boolean"
+    proof_status: Literal["positive", "negative", "both", "unknown", "unanswered"] = "unknown"
+    negative_query: str = ""
+    positive_proof: List[str] = Field(default_factory=list)
+    negative_proof: List[str] = Field(default_factory=list)
+    requirements: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 #  Reset 
@@ -109,12 +115,6 @@ class DebugIngestChunkResult(BaseModel):
     atomspace_added: List[str] = Field(default_factory=list)
     schema_alignment: List[Dict[str, Any]] = Field(default_factory=list)
     predicate_registry: List[Dict[str, Any]] = Field(default_factory=list)
-    senf: Optional[Dict[str, Any]] = None
-    identity_edges: List[Dict[str, Any]] = Field(default_factory=list)
-    weaves: List[Dict[str, Any]] = Field(default_factory=list)
-    senf_bridge_atoms: List[str] = Field(default_factory=list)
-    senf_proof_effect: bool = False
-    senf_error: Optional[str] = None
 
 
 class DebugIngestItemResult(BaseModel):
@@ -149,6 +149,12 @@ class DebugQueryResponse(BaseModel):
     proof: str
     sources: List[str]
     answer: str
+    intent_mode: Literal["boolean", "open", "factors", "explanation", "sufficiency"] = "boolean"
+    proof_status: Literal["positive", "negative", "both", "unknown", "unanswered"] = "unknown"
+    negative_query: str = ""
+    positive_proof: List[str] = Field(default_factory=list)
+    negative_proof: List[str] = Field(default_factory=list)
+    requirements: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class DebugQdrantPoint(BaseModel):
