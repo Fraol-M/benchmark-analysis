@@ -28,6 +28,27 @@ class QueryOrchestrationTests(unittest.TestCase):
 
         self.assertEqual([], candidates)
 
+    def test_candidate_with_wrong_known_arity_is_rejected(self):
+        class FakeReasoner:
+            def predicate_arities(self):
+                return {"QualifiesForMeritScholarship": {1}}
+
+        self.service._reasoner = FakeReasoner()
+
+        candidates = self.service._query_candidates(
+            "Does Lena qualify for a merit scholarship?",
+            [],
+            [
+                "(: $prf (QualifiesForMeritScholarship lena merit) $tv)",
+                "(: $prf (QualifiesForMeritScholarship lena) $tv)",
+            ],
+        )
+
+        self.assertEqual(
+            [("(: $prf (QualifiesForMeritScholarship lena) $tv)", "parser")],
+            candidates,
+        )
+
     def test_matching_parser_target_is_executable(self):
         candidates = self.service._query_candidates(
             "Is Abebe consuming excessive carbohydrates?",
@@ -57,6 +78,52 @@ class QueryOrchestrationTests(unittest.TestCase):
         )
 
         self.assertEqual([], candidates)
+
+    def test_trusted_atomspace_conclusion_recovers_missing_parser_query(self):
+        class FakeReasoner:
+            def proposition_signatures(self):
+                return [
+                    {
+                        "head": "ClassifiedAsPolluted",
+                        "args": ["$lake"],
+                        "arity": 1,
+                        "variables": ["$lake"],
+                        "negated": False,
+                        "role": "conclusion",
+                    },
+                    {
+                        "head": "IsA",
+                        "args": ["lake_aster", "lake"],
+                        "arity": 2,
+                        "variables": [],
+                        "negated": False,
+                        "role": "fact",
+                    },
+                ]
+
+            def predicate_arities(self):
+                return {"ClassifiedAsPolluted": {1}}
+
+        self.service._reasoner = FakeReasoner()
+        trusted = self.service._deterministic_query_candidates(
+            "Is Lake Aster classified as polluted?"
+        )
+        candidates = self.service._query_candidates(
+            "Is Lake Aster classified as polluted?",
+            [],
+            [],
+            trusted,
+        )
+
+        self.assertEqual(
+            [
+                (
+                    "(: $prf (ClassifiedAsPolluted lake_aster) $tv)",
+                    "deterministic",
+                )
+            ],
+            candidates,
+        )
 
 
 if __name__ == "__main__":

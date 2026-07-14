@@ -17,6 +17,8 @@ class ProofOutcome:
     negative_query: str = ""
     positive_proof: List[str] = field(default_factory=list)
     negative_proof: List[str] = field(default_factory=list)
+    proof_validated: bool = True
+    support_kind: str = "unknown"
 
     @property
     def proof(self) -> List[str]:
@@ -41,6 +43,7 @@ class Reasoner:
         self._provenance_path = f"{cfg.atomspace_path}.provenance.jsonl"
         self._query_timeout = cfg.chaining_timeout
         self._max_steps = cfg.chaining_max_steps
+        self._strict_proof_validation = cfg.strict_proof_validation_enabled
         self._lock = threading.Lock()
         self._handler = PeTTaChainer()
         self._background_files: set[str] = set()
@@ -105,6 +108,17 @@ class Reasoner:
         if exact:
             return exact
 
+        # Our strict kernel understands explicit negation. PeTTa may interpret a
+        # negated premise probabilistically, so any rule path containing Not is
+        # proved here and is never delegated as proof authority.
+        strict = self._backward_chain(pln_query)
+        if strict:
+            return strict
+        if self._matching_rule_uses_explicit_negation(pln_query):
+            return []
+        if getattr(self, "_strict_proof_validation", True):
+            return []
+
         try:
             with self._lock:
                 forward_ran = self._forward_chain_from_seed_terms(seed_terms or [])
@@ -117,7 +131,7 @@ class Reasoner:
                 return result
         except Exception as e:
             print(f"[Reasoner] Query failed for '{pln_query}': {e}")
-        return self._backward_chain(pln_query)
+        return []
 
     def query_polarity(
         self,
@@ -127,7 +141,10 @@ class Reasoner:
         """Check a grounded proposition and its explicit negation."""
         negative_query = self.negated_query(pln_query)
         positive = self.query(pln_query, seed_terms=seed_terms)
-        negative = self.query(negative_query, seed_terms=seed_terms) if negative_query else []
+        negative = self._explicit_negation_proof(
+            negative_query,
+            seed_terms=seed_terms,
+        )
         if positive and negative:
             status = "both"
         elif positive:
@@ -136,13 +153,48 @@ class Reasoner:
             status = "negative"
         else:
             status = "unknown"
+        support_kind = self._support_kind(status, positive, negative)
         return ProofOutcome(
             status=status,
             positive_query=pln_query,
             negative_query=negative_query,
             positive_proof=positive,
             negative_proof=negative,
+            proof_validated=True,
+            support_kind=support_kind,
         )
+
+    def _support_kind(
+        self,
+        status: str,
+        positive: List[str],
+        negative: List[str],
+    ) -> str:
+        if status == "both":
+            return "conflict"
+        if status == "negative":
+            return "explicit_negative"
+        if status != "positive":
+            return "unknown"
+        for trace in positive:
+            for match in re.finditer(r"\(STV\s+([0-9]*\.?[0-9]+)\s+", str(trace)):
+                if float(match.group(1)) < 1.0:
+                    return "probabilistic"
+        return "entailed"
+
+    def grounded_query_atom(self, pln_query: str) -> str:
+        return self._extract_grounded_query_atom(pln_query)
+
+    def _explicit_negation_proof(
+        self,
+        negative_query: str,
+        seed_terms: List[str] | None = None,
+    ) -> List[str]:
+        if not negative_query:
+            return []
+        if hasattr(self, "_atomspace_path"):
+            return self._query_exact_fact(negative_query)
+        return self.query(negative_query, seed_terms=seed_terms)
 
     def negated_query(self, pln_query: str) -> str:
         target = self._extract_grounded_query_atom(pln_query)
@@ -396,6 +448,85 @@ class Reasoner:
             return [atom for atom in atoms if pattern in atom]
         return atoms
 
+    def predicate_arities(self) -> dict[str, set[int]]:
+        """Return observed predicate arities from facts and rule atoms."""
+        arities: dict[str, set[int]] = {}
+
+        def record(expr: Any) -> None:
+            if not isinstance(expr, list) or not expr:
+                return
+            head = expr[0]
+            if head in {"Not"} and len(expr) == 2:
+                record(expr[1])
+                return
+            if isinstance(head, str) and head not in {
+                ":",
+                "Implication",
+                "Premises",
+                "Conclusions",
+                "And",
+                "Or",
+                "STV",
+            }:
+                arities.setdefault(head, set()).add(len(expr) - 1)
+
+        for fact_expr, _raw in self._fact_exprs():
+            record(fact_expr)
+        for rule in self._extract_rules(self.get_atoms()):
+            for premise in rule["premises"]:
+                record(premise)
+            for conclusion in rule["conclusions"]:
+                record(conclusion)
+        return arities
+
+    def proposition_signatures(self) -> List[dict[str, Any]]:
+        """Return trusted fact and rule-literal signatures for query compilation."""
+        signatures: List[dict[str, Any]] = []
+        seen: set[tuple[str, tuple[str, ...], bool, str]] = set()
+
+        def record(expr: Any, role: str, negated: bool = False) -> None:
+            if not isinstance(expr, list) or not expr:
+                return
+            head = expr[0]
+            if head in {"Not", "not"} and len(expr) == 2:
+                record(expr[1], role, True)
+                return
+            if head in {"And", "and", "Or", "or", "Premises", "Conclusions"}:
+                for child in expr[1:]:
+                    record(child, role, negated)
+                return
+            if not isinstance(head, str) or head in {
+                ":", "Implication", "STV", "PointMass", "ParticleFromNormal",
+                "ParticleFromPairs",
+            }:
+                return
+            args = tuple(str(arg) for arg in expr[1:] if isinstance(arg, str))
+            if len(args) != len(expr) - 1:
+                return
+            key = (head, args, negated, role)
+            if key in seen:
+                return
+            seen.add(key)
+            signatures.append(
+                {
+                    "head": head,
+                    "args": list(args),
+                    "arity": len(args),
+                    "variables": [arg for arg in args if self._is_variable(arg)],
+                    "negated": negated,
+                    "role": role,
+                }
+            )
+
+        for fact_expr, _raw in self._fact_exprs():
+            record(fact_expr, "fact")
+        for rule in self._extract_rules(self.get_atoms()):
+            for premise in rule["premises"]:
+                record(premise, "premise")
+            for conclusion in rule["conclusions"]:
+                record(conclusion, "conclusion")
+        return signatures
+
     def sources_for_proof(self, proof_traces: List[str]) -> List[str]:
         """Resolve proof atoms to exact extraction spans recorded at ingestion."""
         if not os.path.exists(self._provenance_path):
@@ -498,6 +629,8 @@ class Reasoner:
 
         # Compare predicates
         if query_expr[0] != conclusion_expr[0]:
+            return None
+        if len(query_expr) != len(conclusion_expr):
             return None
 
         # Collect bindings: match variables in conclusion against query args
@@ -637,9 +770,17 @@ class Reasoner:
         if direct:
             return direct
 
+        # Explicit negation is open-world: only an explicit negative atom may
+        # satisfy a negative literal. Failure to prove P never proves Not(P).
+        if self._is_explicit_negation(premise):
+            return []
+
         nested = self._backward_chain(premise_query, seen)
         if nested:
             return nested
+
+        if self._matching_rule_uses_explicit_negation(premise_query):
+            return []
 
         try:
             direct_chain = self._handler.query(
@@ -650,6 +791,31 @@ class Reasoner:
         except Exception:
             direct_chain = []
         return direct_chain
+
+    def _is_explicit_negation(self, expr: Any) -> bool:
+        return (
+            isinstance(expr, list)
+            and len(expr) == 2
+            and expr[0] in {"Not", "not"}
+        )
+
+    def _matching_rule_uses_explicit_negation(self, query: str) -> bool:
+        for rule in self._extract_rules(self.get_atoms()):
+            if not any(
+                self._match_conclusion(query, conclusion) is not None
+                for conclusion in rule["conclusions"]
+            ):
+                continue
+            if any(self._contains_explicit_negation(item) for item in rule["premises"]):
+                return True
+        return False
+
+    def _contains_explicit_negation(self, expr: Any) -> bool:
+        if not isinstance(expr, list) or not expr:
+            return False
+        if expr[0] in {"Not", "not"}:
+            return True
+        return any(self._contains_explicit_negation(item) for item in expr[1:])
 
     def _fact_exprs(self) -> List[tuple[Any, str]]:
         facts: List[tuple[Any, str]] = []

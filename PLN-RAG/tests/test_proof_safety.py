@@ -130,6 +130,68 @@ class ProofSafetyTests(unittest.TestCase):
         self.assertIn("(HasFamilyHistoryOfDiabetes $x)", repaired)
         self.assertIn("(AtElevatedDiabetesRisk $x)", repaired)
 
+    def test_semantic_mapping_bridges_are_suppressed_by_default(self):
+        class Registry:
+            def align_statements(self, **kwargs):
+                return kwargs["statements"], []
+
+            def build_validated_bridges(self, statements, context):
+                return [
+                    "(: unsafe (Implication (Premises (CanIncreaseTemperature $x)) "
+                    "(Conclusions (Overheating $x))) (STV 0.9 0.8))"
+                ], []
+
+        result = PLNPostprocessor(predicate_registry=Registry()).process(
+            text="A blocked filter can increase temperature.",
+            statements=[
+                "(: filter_fact (CanIncreaseTemperature blocked_filter) "
+                "(STV 1.0 1.0))"
+            ],
+            queries=[],
+            context=[],
+            plan_queries=False,
+        )
+
+        self.assertFalse(any("(Overheating $x)" in item for item in result.statements))
+        self.assertTrue(
+            any(
+                item.get("action") == "semantic_bridges_suppressed"
+                for item in result.alignment_decisions
+            )
+        )
+
+    def test_unencoded_modal_rule_is_rejected(self):
+        translated = translate_extractions_to_pln(
+            [
+                extraction(
+                    "rule",
+                    "Overheating can trigger automatic shutdown.",
+                    head_predicate="triggers-automatic-shutdown",
+                    head_args="$x",
+                    body="(overheating $x)",
+                )
+            ]
+        )
+
+        self.assertEqual([], translated.statements)
+        self.assertIn("modal", translated.rejected[0].reason)
+
+    def test_modal_rule_is_allowed_when_predicate_encodes_modality(self):
+        translated = translate_extractions_to_pln(
+            [
+                extraction(
+                    "rule",
+                    "Overheating can trigger automatic shutdown.",
+                    head_predicate="can-trigger-automatic-shutdown",
+                    head_args="$x",
+                    body="(overheating $x)",
+                )
+            ]
+        )
+
+        self.assertEqual(1, len(translated.statements))
+        self.assertIn("CanTriggerAutomaticShutdown", translated.statements[0])
+
 
 if __name__ == "__main__":
     unittest.main()

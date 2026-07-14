@@ -4,6 +4,8 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Iterable
 
+from core.discourse.coreference import ChunkCorefResult, CorefCluster, CorefMention
+
 
 PRONOUNS = {
     "he",
@@ -56,6 +58,14 @@ class Mention:
     start: int
     end: int
     candidates: list[str] = field(default_factory=list)
+    cluster_id: str | None = None
+    canonical_mention: str | None = None
+    resolved_to: str | None = None
+    resolution_source: str | None = None
+    ambiguous: bool = False
+    global_start: int | None = None
+    global_end: int | None = None
+    pair_logit: float | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -64,13 +74,36 @@ class Mention:
 @dataclass
 class MentionPrepassResult:
     mentions: list[Mention] = field(default_factory=list)
+    coreference: dict = field(default_factory=dict)
 
     @property
     def ambiguous_pronouns(self) -> list[Mention]:
         return [
             mention
             for mention in self.mentions
-            if mention.kind == "pronoun" and len(mention.candidates) > 1
+            if mention.kind == "pronoun"
+            and (len(mention.candidates) > 1 or mention.ambiguous)
+        ]
+
+    @property
+    def resolved_pronouns(self) -> list[Mention]:
+        return [
+            mention
+            for mention in self.mentions
+            if mention.kind == "pronoun"
+            and mention.resolved_to
+            and not mention.ambiguous
+        ]
+
+    @property
+    def unresolved_pronouns(self) -> list[Mention]:
+        return [
+            mention
+            for mention in self.mentions
+            if mention.kind == "pronoun"
+            and not mention.resolved_to
+            and not mention.candidates
+            and mention.resolution_source == "unresolved"
         ]
 
     def to_dict(self) -> dict:
@@ -79,11 +112,33 @@ class MentionPrepassResult:
             "ambiguous_pronouns": [
                 mention.to_dict() for mention in self.ambiguous_pronouns
             ],
+            "resolved_pronouns": [
+                mention.to_dict() for mention in self.resolved_pronouns
+            ],
+            "unresolved_pronouns": [
+                mention.to_dict() for mention in self.unresolved_pronouns
+            ],
+            "coreference": self.coreference,
         }
 
     def prompt_hint(self, *, max_mentions: int = 16) -> str:
-        if not self.mentions:
+        ambiguous = self.ambiguous_pronouns
+        resolved = self.resolved_pronouns
+        unresolved = self.unresolved_pronouns
+        if not ambiguous and not resolved and not unresolved:
             return ""
+
+        relevant_ids = {
+            candidate
+            for mention in ambiguous
+            for candidate in mention.candidates
+        }
+        relevant_ids.update(mention.id for mention in ambiguous)
+        relevant_ids.update(mention.id for mention in resolved)
+        relevant_ids.update(mention.id for mention in unresolved)
+        relevant = [
+            mention for mention in self.mentions if mention.id in relevant_ids
+        ][:max_mentions]
 
         lines = [
             "",
@@ -93,17 +148,43 @@ class MentionPrepassResult:
             "- If a pronoun has multiple candidates, do not replace it with one candidate.",
             "- For ambiguous pronouns, preserve the pronoun mention id as the argument "
             "(for example it_m4) instead of guessing camera or phone.",
+            "- For unambiguous resolved pronouns, use the canonical entity only as the "
+            "semantic argument and preserve the original source mention.",
         ]
-        for mention in self.mentions[:max_mentions]:
+        for mention in relevant:
             candidate_text = ""
             if mention.candidates:
                 candidate_text = (
                     " candidates="
                     + ",".join(self._candidate_labels(mention.candidates))
                 )
+            resolution_text = ""
+            if mention.resolved_to:
+                resolution_text = (
+                    f" resolved_to={mention.resolved_to!r}"
+                    f" source={mention.resolution_source!r}"
+                )
+            elif mention.ambiguous:
+                resolution_text = " unresolved=ambiguous"
+            elif mention.resolution_source == "unresolved":
+                resolution_text = " unresolved=no_canonical_mention"
             lines.append(
                 f"- {mention.id}: {mention.kind} text={mention.text!r} "
-                f"canonical={mention.canonical!r}{candidate_text}"
+                f"canonical={mention.canonical!r}{candidate_text}{resolution_text}"
+            )
+        for mention in resolved[:max_mentions]:
+            lines.append(
+                f"- The mention {mention.text!r} at characters "
+                f"{mention.global_start if mention.global_start is not None else mention.start}-"
+                f"{mention.global_end if mention.global_end is not None else mention.end} "
+                f"belongs to the same entity cluster as {mention.resolved_to!r}. "
+                f"Use {mention.resolved_to!r} as the semantic subject/object when "
+                "extracting propositions; preserve the original mention text."
+            )
+        for mention in ambiguous[:max_mentions]:
+            lines.append(
+                f"- The mention {mention.text!r} has multiple possible named "
+                "antecedents. Do not guess its referent."
             )
         return "\n".join(lines)
 
@@ -119,7 +200,13 @@ class MentionPrepassResult:
 class MentionPrepass:
     """Small deterministic mention scan used to preserve ambiguity for LangExtract."""
 
-    def build(self, text: str) -> MentionPrepassResult:
+    def build(
+        self,
+        text: str,
+        *,
+        coref_result: ChunkCorefResult | None = None,
+        global_offset: int = 0,
+    ) -> MentionPrepassResult:
         mentions: list[Mention] = []
         prior_nominals: list[Mention] = []
         sentence_spans = list(self._sentence_spans(text))
@@ -184,14 +271,31 @@ class MentionPrepass:
                             noun_end,
                         )
                         mention_number += 1
-                        mentions.append(mention)
-                        token_mentions.append(mention)
+                    mentions.append(mention)
+                    token_mentions.append(mention)
 
             prior_nominals.extend(
                 mention for mention in token_mentions if mention.kind != "pronoun"
             )
 
-        return MentionPrepassResult(mentions=mentions)
+        for mention in mentions:
+            mention.global_start = global_offset + mention.start
+            mention.global_end = global_offset + mention.end
+            mention.resolution_source = mention.resolution_source or "deterministic"
+
+        if coref_result is not None:
+            mention_number = self._merge_coreference(
+                mentions,
+                mention_number,
+                text,
+                coref_result,
+            )
+
+        coreference_metadata = coref_result.to_dict() if coref_result else {}
+        return MentionPrepassResult(
+            mentions=mentions,
+            coreference=coreference_metadata,
+        )
 
     def _new_nominal(
         self,
@@ -255,4 +359,102 @@ class MentionPrepass:
     def _pronoun_compatible(self, pronoun: str, mention: Mention) -> bool:
         if pronoun in {"it", "its"}:
             return mention.kind in {"definite", "nominal"}
-        return True
+        if pronoun in {"he", "her", "him", "his", "she"}:
+            return mention.kind == "name"
+        return mention.kind in {"name", "nominal"}
+
+    def _merge_coreference(
+        self,
+        mentions: list[Mention],
+        mention_number: int,
+        text: str,
+        coref_result: ChunkCorefResult,
+    ) -> int:
+        by_span = {
+            (mention.global_start, mention.global_end): mention
+            for mention in mentions
+        }
+        used_ids = {mention.id for mention in mentions}
+        for cluster in coref_result.clusters:
+            for coref_mention in cluster.mentions:
+                if coref_mention.start < coref_result.chunk_start:
+                    continue
+                if coref_mention.end > coref_result.chunk_end:
+                    continue
+                local_start = coref_mention.start - coref_result.chunk_start
+                local_end = coref_mention.end - coref_result.chunk_start
+                if local_start < 0 or local_end > len(text):
+                    continue
+                key = (coref_mention.start, coref_mention.end)
+                mention = by_span.get(key)
+                if mention is None:
+                    mention = self._mention_from_coref(
+                        coref_mention,
+                        cluster,
+                        mention_number,
+                        local_start,
+                        local_end,
+                        used_ids,
+                    )
+                    mention_number += 1
+                    mentions.append(mention)
+                    by_span[key] = mention
+                    used_ids.add(mention.id)
+                self._apply_coref_metadata(mention, coref_mention, cluster)
+        mentions.sort(key=lambda mention: (mention.start, mention.end, mention.id))
+        return mention_number
+
+    def _mention_from_coref(
+        self,
+        coref_mention: CorefMention,
+        cluster: CorefCluster,
+        number: int,
+        local_start: int,
+        local_end: int,
+        used_ids: set[str],
+    ) -> Mention:
+        canonical = self._canonical(coref_mention.text)
+        kind = "pronoun" if coref_mention.is_pronoun else (
+            coref_mention.mention_type or "nominal"
+        )
+        mention_id = f"{canonical or 'mention'}_m{number}"
+        while mention_id in used_ids:
+            number += 1
+            mention_id = f"{canonical or 'mention'}_m{number}"
+        return Mention(
+            id=mention_id,
+            text=coref_mention.text,
+            canonical=canonical,
+            kind=kind,
+            sentence_index=-1,
+            start=local_start,
+            end=local_end,
+            cluster_id=cluster.cluster_id,
+            global_start=coref_mention.start,
+            global_end=coref_mention.end,
+            pair_logit=coref_mention.pair_logit,
+        )
+
+    def _apply_coref_metadata(
+        self,
+        mention: Mention,
+        coref_mention: CorefMention,
+        cluster: CorefCluster,
+    ) -> None:
+        mention.cluster_id = cluster.cluster_id
+        mention.global_start = coref_mention.start
+        mention.global_end = coref_mention.end
+        mention.pair_logit = coref_mention.pair_logit
+        mention.ambiguous = bool(cluster.ambiguous)
+        canonical = cluster.canonical_mention
+        mention.canonical_mention = canonical.text if canonical else None
+        if mention.kind == "pronoun":
+            if cluster.ambiguous:
+                mention.resolved_to = None
+                mention.resolution_source = "unresolved"
+            elif canonical is not None:
+                mention.resolved_to = canonical.text
+                mention.canonical = self._canonical(canonical.text)
+                mention.resolution_source = "lingmess"
+            else:
+                mention.resolution_source = "unresolved"

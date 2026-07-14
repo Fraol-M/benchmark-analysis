@@ -15,11 +15,20 @@ from core.query.intent import (
     QuestionIntent,
     QuestionMode,
     parse_question_intent,
+    parse_query_signature,
     query_intent_score,
     query_matches_intent,
 )
 from core.reasoning.reasoner import ProofOutcome, Reasoner
+from core.pln.symbol_normalization import canonical_symbol
 from core.answering.answer_generator import AnswerGenerator
+from core.discourse import (
+    CoreferenceResolver,
+    DocumentCorefResult,
+    NullCoreferenceResolver,
+    project_coref_to_chunk,
+)
+from core.extraction.langextract_chunker import TextChunk
 from storage.vector_store import VectorStore
 from api.models import (
     IngestItemResult,
@@ -49,6 +58,44 @@ class PLNRAGService:
         self._answer_gen = AnswerGenerator()
         self._context_top_k = cfg.context_top_k
         self._query_fallback_enabled = cfg.query_fallback_enabled
+        self._coreference_enabled = cfg.coreference_enabled
+        self._coreference_fail_open = cfg.coreference_fail_open
+        self._coreference_resolver = self._create_coreference_resolver(cfg)
+
+    def _create_coreference_resolver(self, cfg) -> CoreferenceResolver:
+        if not cfg.coreference_enabled:
+            print("[Coreference] disabled.")
+            return NullCoreferenceResolver()
+        if cfg.coreference_backend != "lingmess":
+            message = f"Unsupported coreference backend: {cfg.coreference_backend}"
+            if cfg.coreference_fail_open:
+                print(f"[Coreference] {message}; using deterministic prepass.")
+                return NullCoreferenceResolver()
+            raise ValueError(message)
+        try:
+            from core.discourse.lingmess_coreference import (
+                LingMessCoreferenceResolver,
+            )
+
+            print(
+                "[Coreference] enabled backend=lingmess "
+                f"model={cfg.coreference_model} mode={cfg.coreference_mode} "
+                f"device={cfg.coreference_device}"
+            )
+            return LingMessCoreferenceResolver(
+                model_name=cfg.coreference_model,
+                device=cfg.coreference_device,
+                max_tokens_in_batch=cfg.coreference_max_tokens_in_batch,
+                include_pair_logits=cfg.coreference_include_pair_logits,
+            )
+        except Exception as exc:
+            if cfg.coreference_fail_open:
+                print(
+                    "[Coreference] initialization failed; using deterministic "
+                    f"prepass: {exc}"
+                )
+                return NullCoreferenceResolver()
+            raise
 
     #  Ingest
 
@@ -77,14 +124,21 @@ class PLNRAGService:
     def _ingest_single(self, text: str) -> IngestItemResult:
         try:
             # 1. Chunk large texts
-            chunks = self._chunker.chunk(text)
+            chunks = self._chunk_document(text)
+            document_coref = self._resolve_document_coref(text)
             all_atoms: List[str] = []
+            parser_calls = 0
 
             for chunk in chunks:
+                chunk_text = chunk.text
+                mention_prepass = self._build_chunk_mention_prepass(
+                    chunk,
+                    document_coref,
+                )
                 # 2. Retrieve context from atomspace + vector store
                 if self._vector_store:
                     context, vector = self._vector_store.retrieve_context(
-                        chunk, top_k=self._context_top_k
+                        chunk_text, top_k=self._context_top_k
                     )
                 else:
                     context, vector = [], []
@@ -92,10 +146,11 @@ class PLNRAGService:
                 context = self._enrich_context(context)
 
                 # 3. Parse chunk → PLN atoms
-                parse_result = self._parser.parse(chunk, context)
+                parse_result = self._parse_chunk(chunk_text, context, mention_prepass)
+                parser_calls += 1
 
                 if not parse_result.statements:
-                    print(f"[Service] No statements for chunk: '{chunk[:60]}...'")
+                    print(f"[Service] No statements for chunk: '{chunk_text[:60]}...'")
                     continue
 
                 # 4. Add to atomspace via reasoner
@@ -109,14 +164,20 @@ class PLNRAGService:
                 # 5. Store in vector DB for future context retrieval
                 if added and self._vector_store:
                     self._vector_store.store(
-                        chunk,
+                        chunk_text,
                         added,
                         vector,
                         metadata=parse_result.metadata,
                         query_targets=extract_query_targets(added),
                     )
 
-            return IngestItemResult(text=text, atoms=all_atoms, status="success")
+            return IngestItemResult(
+                text=text,
+                atoms=all_atoms,
+                status="success",
+                chunk_count=len(chunks),
+                parser_calls=parser_calls,
+            )
 
         except Exception as e:
             import traceback
@@ -126,19 +187,29 @@ class PLNRAGService:
 
     def _debug_ingest_single(self, text: str) -> DebugIngestItemResult:
         try:
-            chunks = self._chunker.chunk(text)
+            chunks = self._chunk_document(text)
+            document_coref = self._resolve_document_coref(text)
             chunk_results: List[DebugIngestChunkResult] = []
 
             for chunk in chunks:
+                chunk_text = chunk.text
+                mention_prepass = self._build_chunk_mention_prepass(
+                    chunk,
+                    document_coref,
+                )
                 if self._vector_store:
                     context, vector = self._vector_store.retrieve_context(
-                        chunk, top_k=self._context_top_k
+                        chunk_text, top_k=self._context_top_k
                     )
                 else:
                     context, vector = [], []
                 context = self._enrich_context(context)
 
-                debug_info = self._parser.debug_parse(chunk, context)
+                debug_info = self._debug_parse_chunk(
+                    chunk_text,
+                    context,
+                    mention_prepass,
+                )
                 langextract_info = debug_info.get("langextract_postprocessed", {})
                 pln_canonicalized = debug_info.get("pln_canonicalized", [])
                 schema_alignment = debug_info.get("schema_alignment", [])
@@ -164,7 +235,7 @@ class PLNRAGService:
 
                 if added and self._vector_store:
                     self._vector_store.store(
-                        chunk,
+                        chunk_text,
                         added,
                         vector,
                         metadata=debug_metadata,
@@ -173,7 +244,10 @@ class PLNRAGService:
 
                 chunk_results.append(
                     DebugIngestChunkResult(
-                        chunk=chunk,
+                        chunk=chunk_text,
+                        chunk_start=chunk.start,
+                        chunk_end=chunk.end,
+                        coreference=getattr(mention_prepass, "coreference", {}),
                         context=context,
                         langextract_postprocessed=LangExtractPostprocessed(
                             **langextract_info
@@ -188,6 +262,7 @@ class PLNRAGService:
             return DebugIngestItemResult(
                 text=text,
                 chunks=chunk_results,
+                coreference=document_coref.to_dict(),
                 status="success",
             )
 
@@ -196,6 +271,79 @@ class PLNRAGService:
 
             traceback.print_exc()
             return DebugIngestItemResult(text=text, status="failed", error=str(e))
+
+    def _chunk_document(self, text: str) -> List[TextChunk]:
+        if hasattr(self._chunker, "chunk_with_spans"):
+            return list(self._chunker.chunk_with_spans(text))
+        chunks = self._chunker.chunk(text)
+        result: List[TextChunk] = []
+        cursor = 0
+        for index, chunk in enumerate(chunks):
+            start = text.find(chunk, cursor)
+            if start < 0:
+                start = cursor
+            end = min(len(text), start + len(chunk))
+            cursor = end
+            result.append(TextChunk(index=index, text=chunk, start=start, end=end))
+        return result
+
+    def _resolve_document_coref(self, text: str) -> DocumentCorefResult:
+        if not self._coreference_enabled:
+            return DocumentCorefResult(text=text, backend="none", model_name="")
+        try:
+            return self._coreference_resolver.resolve_document(text)
+        except Exception as exc:
+            if not self._coreference_fail_open:
+                raise
+            print(
+                "[Coreference] document resolution failed; continuing with "
+                f"deterministic prepass: {exc}"
+            )
+            return DocumentCorefResult(
+                text=text,
+                backend=getattr(self._coreference_resolver, "backend", "unknown"),
+                model_name=getattr(self._coreference_resolver, "model_name", ""),
+                error=str(exc),
+            )
+
+    def _build_chunk_mention_prepass(
+        self,
+        chunk: TextChunk,
+        document_coref: DocumentCorefResult,
+    ):
+        chunk_coref = project_coref_to_chunk(
+            document_coref,
+            chunk.start,
+            chunk.end,
+            chunk.text,
+        )
+        if hasattr(self._parser, "build_mention_prepass"):
+            return self._parser.build_mention_prepass(
+                chunk.text,
+                coref_result=chunk_coref,
+                global_offset=chunk.start,
+            )
+        return None
+
+    def _parse_chunk(self, text: str, context: List[str], mention_prepass):
+        try:
+            return self._parser.parse(
+                text,
+                context,
+                mention_prepass=mention_prepass,
+            )
+        except TypeError:
+            return self._parser.parse(text, context)
+
+    def _debug_parse_chunk(self, text: str, context: List[str], mention_prepass):
+        try:
+            return self._parser.debug_parse(
+                text,
+                context,
+                mention_prepass=mention_prepass,
+            )
+        except TypeError:
+            return self._parser.debug_parse(text, context)
 
     def _enrich_context(self, rag_context: List[str], max_atoms: int = 50) -> List[str]:
         """
@@ -253,6 +401,7 @@ class PLNRAGService:
         question: str,
         _qdrant_queries: List[str],
         parser_queries: List[str],
+        trusted_queries: List[str] | None = None,
     ) -> List[tuple[str, str]]:
         entries: List[tuple[str, str]] = []
         seen: set[str] = set()
@@ -263,10 +412,18 @@ class PLNRAGService:
         )
         # Retrieval supplies context and vocabulary, never proof targets.
         # A candidate rejected by the intent gate must not be restored.
-        for source, queries in (("parser", filtered_parser),):
+        for source, queries in (
+            ("deterministic", trusted_queries or []),
+            ("parser", filtered_parser),
+        ):
             for query in queries:
                 clean = " ".join(str(query).split())
-                if not clean or clean in seen or not query_matches_intent(intent, clean):
+                if (
+                    not clean
+                    or clean in seen
+                    or not query_matches_intent(intent, clean)
+                    or not self._query_arity_allowed(clean)
+                ):
                     continue
                 seen.add(clean)
                 entries.append((clean, source))
@@ -275,6 +432,74 @@ class PLNRAGService:
             reverse=True,
         )
         return entries
+
+    def _deterministic_query_candidates(self, question: str) -> List[str]:
+        reasoner = getattr(self, "_reasoner", None)
+        if not reasoner or not hasattr(reasoner, "proposition_signatures"):
+            return []
+        signatures = reasoner.proposition_signatures()
+        entities = self._mentioned_kb_entities(question, signatures)
+        candidates: List[str] = []
+        seen: set[str] = set()
+        for signature in signatures:
+            args = list(signature.get("args", []))
+            variables = list(signature.get("variables", []))
+            grounded_rows: List[List[str]] = []
+            if variables:
+                if len(set(variables)) != 1:
+                    continue
+                grounded_rows = [
+                    [entity if arg in variables else arg for arg in args]
+                    for entity in entities
+                ]
+            else:
+                grounded_rows = [args]
+            for grounded in grounded_rows:
+                if any(arg.startswith(("$", "?")) for arg in grounded):
+                    continue
+                query = (
+                    f"(: $prf ({signature['head']} {' '.join(grounded)}) $tv)"
+                )
+                if query in seen:
+                    continue
+                seen.add(query)
+                candidates.append(query)
+        return candidates
+
+    def _mentioned_kb_entities(
+        self,
+        question: str,
+        signatures: List[dict],
+    ) -> List[str]:
+        normalized_question = canonical_symbol(question, lemmatize=False)
+        compact_question = normalized_question.replace("_", "")
+        entities: List[str] = []
+        for signature in signatures:
+            for raw_arg in signature.get("args", []):
+                arg = canonical_symbol(str(raw_arg), lemmatize=False)
+                if not arg or arg.startswith(("$", "?")) or arg.isdigit():
+                    continue
+                phrase_match = re.search(
+                    rf"(?:^|_){re.escape(arg)}(?:_|$)",
+                    normalized_question,
+                )
+                compact_match = len(arg) >= 4 and arg.replace("_", "") in compact_question
+                if (phrase_match or compact_match) and arg not in entities:
+                    entities.append(arg)
+        return sorted(entities, key=lambda item: (-len(item), item))
+
+    def _query_arity_allowed(self, query: str) -> bool:
+        signature = parse_query_signature(query)
+        if not signature:
+            return False
+        reasoner = getattr(self, "_reasoner", None)
+        if not reasoner or not hasattr(reasoner, "predicate_arities"):
+            return True
+        arities = reasoner.predicate_arities()
+        allowed = arities.get(str(signature["head"]))
+        if arities and allowed is None:
+            return False
+        return not allowed or int(signature["arity"]) in allowed
 
     async def query(self, question: str) -> QueryResponse:
         cfg = get_settings()
@@ -310,10 +535,12 @@ class PLNRAGService:
         original_query = parse_result.queries[0] if parse_result.queries else (
             qdrant_queries[0] if qdrant_queries else ""
         )
+        trusted_queries = self._deterministic_query_candidates(question)
         candidate_entries = self._query_candidates(
             question,
             qdrant_queries,
             parse_result.queries,
+            trusted_queries,
         )
         if intent.mode in {QuestionMode.FACTORS, QuestionMode.SUFFICIENCY}:
             requirements = self._reasoner.explain_requirements(
@@ -337,6 +564,7 @@ class PLNRAGService:
                 execution_candidates=[],
                 intent_mode=intent.mode.value,
                 proof_status="unanswered",
+                proof_validated=True,
                 requirements=requirements,
                 context_retrieval_seconds=round(context_retrieval_seconds, 4),
                 parse_query_seconds=round(parse_query_seconds, 4),
@@ -359,7 +587,9 @@ class PLNRAGService:
                 qdrant_aligned_queries=qdrant_queries,
                 execution_candidates=[],
                 intent_mode=intent.mode.value,
-                proof_status="unanswered",
+                proof_status="unknown",
+                proof_validated=True,
+                rejection_reasons=["no_semantically_compatible_query"],
                 context_retrieval_seconds=round(context_retrieval_seconds, 4),
                 parse_query_seconds=round(parse_query_seconds, 4),
                 reasoning_seconds=0.0,
@@ -374,11 +604,9 @@ class PLNRAGService:
         first_outcome: ProofOutcome | None = None
         executed_query = ""
         executed_source = "none"
-        candidates = (
-            candidate_entries
-            if self._query_fallback_enabled
-            else candidate_entries[:1]
-        )
+        candidates = self._proof_equivalent_candidates(candidate_entries)
+        if not self._query_fallback_enabled:
+            candidates = candidates[:1]
 
         candidate_count_total = len(candidates)
         max_tries = int(getattr(cfg, "query_candidate_max_tries", 0) or 0)
@@ -535,6 +763,11 @@ class PLNRAGService:
             positive_proof=proof_outcome.positive_proof,
             negative_proof=proof_outcome.negative_proof,
             requirements=requirements,
+            canonical_proposition=self._reasoner.grounded_query_atom(executed_query),
+            target_alignment=("exact" if executed_source == "deterministic" else "compatible"),
+            proof_validated=proof_outcome.proof_validated,
+            support_kind=proof_outcome.support_kind,
+            unresolved_mentions=self._ambiguous_mentions(parse_result.metadata),
         )
 
     async def debug_query(self, question: str) -> DebugQueryResponse:
@@ -568,10 +801,12 @@ class PLNRAGService:
         original_query = pln_candidates[0] if pln_candidates else (
             qdrant_queries[0] if qdrant_queries else ""
         )
+        trusted_queries = self._deterministic_query_candidates(question)
         candidate_entries = self._query_candidates(
             question,
             qdrant_queries,
             pln_candidates,
+            trusted_queries,
         )
         if intent.mode in {QuestionMode.FACTORS, QuestionMode.SUFFICIENCY}:
             requirements = self._reasoner.explain_requirements(
@@ -599,6 +834,7 @@ class PLNRAGService:
                 answer=self._answer_structured_intent(intent, requirements),
                 intent_mode=intent.mode.value,
                 proof_status="unanswered",
+                proof_validated=True,
                 requirements=requirements,
             )
         if not candidate_entries:
@@ -621,14 +857,14 @@ class PLNRAGService:
                 sources=[],
                 answer="I couldn't translate this question into a logical query.",
                 intent_mode=intent.mode.value,
-                proof_status="unanswered",
+                proof_status="unknown",
+                proof_validated=True,
+                rejection_reasons=["no_semantically_compatible_query"],
             )
 
-        candidates = (
-            candidate_entries
-            if self._query_fallback_enabled
-            else candidate_entries[:1]
-        )
+        candidates = self._proof_equivalent_candidates(candidate_entries)
+        if not self._query_fallback_enabled:
+            candidates = candidates[:1]
         max_tries = int(getattr(cfg, "query_candidate_max_tries", 0) or 0)
         if self._query_fallback_enabled and max_tries > 0:
             candidates = candidates[:max_tries]
@@ -726,7 +962,38 @@ class PLNRAGService:
             positive_proof=proof_outcome.positive_proof,
             negative_proof=proof_outcome.negative_proof,
             requirements=requirements,
+            canonical_proposition=self._reasoner.grounded_query_atom(executed_query),
+            target_alignment=("exact" if executed_source == "deterministic" else "compatible"),
+            proof_validated=proof_outcome.proof_validated,
+            support_kind=proof_outcome.support_kind,
+            unresolved_mentions=self._ambiguous_mentions(langextract_info),
         )
+
+    def _ambiguous_mentions(self, metadata: dict) -> List[dict]:
+        mention_data = metadata.get("mention_prepass", metadata)
+        ambiguous = mention_data.get("ambiguous_pronouns", []) if isinstance(mention_data, dict) else []
+        return [item for item in ambiguous if isinstance(item, dict)]
+
+    def _proof_equivalent_candidates(
+        self,
+        entries: List[tuple[str, str]],
+    ) -> List[tuple[str, str]]:
+        if not entries:
+            return []
+        first = parse_query_signature(entries[0][0])
+        if not first:
+            return entries[:1]
+        equivalent: List[tuple[str, str]] = []
+        for entry in entries:
+            signature = parse_query_signature(entry[0])
+            if not signature:
+                continue
+            if (
+                signature["head"] == first["head"]
+                and signature["args"] == first["args"]
+            ):
+                equivalent.append(entry)
+        return equivalent or entries[:1]
 
     def _answer_structured_intent(
         self,
@@ -801,6 +1068,11 @@ class PLNRAGService:
                 "did ",
                 "can ",
                 "could ",
+                "may ",
+                "might ",
+                "must ",
+                "shall ",
+                "should ",
                 "has ",
                 "have ",
                 "had ",

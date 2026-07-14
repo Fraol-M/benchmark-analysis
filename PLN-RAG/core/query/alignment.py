@@ -14,6 +14,8 @@ STOPWORDS = {
     "at",
     "be",
     "by",
+    "can",
+    "could",
     "do",
     "does",
     "did",
@@ -26,6 +28,9 @@ STOPWORDS = {
     "in",
     "is",
     "it",
+    "may",
+    "might",
+    "must",
     "of",
     "on",
     "or",
@@ -42,17 +47,29 @@ STOPWORDS = {
     "who",
     "why",
     "with",
+    "shall",
+    "should",
 }
 GENERIC_INTENT_TERMS = {
     "at",
     "become",
     "becoming",
+    "classification",
+    "classified",
+    "classify",
+    "considered",
     "elevated",
+    "eligible",
+    "eligibility",
     "high",
     "higher",
     "low",
     "lower",
+    "qualifies",
+    "qualified",
+    "qualify",
     "risk",
+    "status",
 }
 RISK_REDUCTION_TERMS = {
     "decreas",
@@ -458,17 +475,20 @@ def _target_matches_question_intent(
         return False
     if not question_anchors:
         return True
-    return bool(target_terms.intersection(question_anchors))
+    return _covers_required_terms(question_anchors, target_terms)
 
 
 def _question_anchor_terms(
     question_terms: set[str],
     question_entities: list[str],
 ) -> set[str]:
+    entity_terms = set(question_entities)
+    for entity in question_entities:
+        entity_terms.update(part for part in entity.split("_") if part)
     anchors = set(question_terms)
-    anchors.difference_update(question_entities)
+    anchors.difference_update(entity_terms)
     anchors.difference_update(GENERIC_INTENT_TERMS)
-    return anchors or (set(question_terms) - set(question_entities))
+    return anchors or (set(question_terms) - entity_terms)
 
 
 def _query_target_expr(query: str) -> SExpr | None:
@@ -521,6 +541,8 @@ def _score_grounded_target(
 def _expand_terms(terms: set[str]) -> set[str]:
     expanded = set(terms)
     for term in list(terms):
+        if "_" in term:
+            expanded.update(part for part in term.split("_") if part and part not in STOPWORDS)
         if term.endswith("ing") and len(term) > 5:
             base = term[:-3]
             expanded.add(base)
@@ -537,7 +559,54 @@ def _expand_terms(terms: set[str]) -> set[str]:
             expanded.add("obese")
         if term in {"high", "higher", "excessive"}:
             expanded.update({"high", "higher", "excessive"})
+        if term in {"waived", "waiv"}:
+            expanded.add("waive")
+        if term in {"qualified", "qualifies"}:
+            expanded.add("qualify")
+        if term in {"triggered", "trigger"}:
+            expanded.update({"trigger", "triggered"})
     return expanded
+
+
+def _covers_required_terms(required_terms: set[str], target_terms: set[str]) -> bool:
+    normalized_target: set[str] = set()
+    for term in target_terms:
+        normalized_target.update(_term_alternates(term))
+    for term in required_terms:
+        if not _term_alternates(term).intersection(normalized_target):
+            return False
+    return True
+
+
+def _term_alternates(term: str) -> set[str]:
+    alternates = {term}
+    if "_" in term:
+        alternates.update(part for part in term.split("_") if part and part not in STOPWORDS)
+    if term.endswith("ing") and len(term) > 5:
+        base = term[:-3]
+        alternates.update({base, base + "e"})
+    if term.endswith("ed") and len(term) > 4:
+        alternates.add(term[:-2])
+        if term[:-1].endswith("e"):
+            alternates.add(term[:-1])
+    groups = [
+        {"consume", "consumes", "consuming", "consumed", "consum"},
+        {"high", "higher", "excessive"},
+        {"obese", "obesity"},
+        {"qualify", "qualifies", "qualified", "eligible", "eligibility"},
+        {"classify", "classified", "classification", "classifi"},
+        {"deny", "denied", "deni"},
+        {"waive", "waived", "waiv"},
+        {"lead", "led", "leading"},
+        {"trigger", "triggered", "triggering", "triggers"},
+        {"pollute", "polluted", "pollution"},
+        {"reject", "rejected", "rejecting"},
+        {"authorize", "authorized", "authorization"},
+    ]
+    for group in groups:
+        if term in group:
+            alternates.update(group)
+    return alternates
 
 
 def _replace_symbol(expr: SExpr, old: str, new: str) -> SExpr:

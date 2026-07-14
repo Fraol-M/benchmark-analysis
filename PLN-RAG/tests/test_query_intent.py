@@ -36,6 +36,19 @@ class QueryIntentTests(unittest.TestCase):
             )
         )
 
+    def test_should_question_is_boolean(self):
+        intent = parse_question_intent(
+            "Should Nia be flagged for urgent respiratory review?"
+        )
+
+        self.assertEqual(QuestionMode.BOOLEAN, intent.mode)
+        self.assertTrue(
+            query_matches_intent(
+                intent,
+                "(: $prf (FlaggedForUrgentRespiratoryReview nia) $tv)",
+            )
+        )
+
     def test_cross_domain_boolean_targets_require_relation_match(self):
         cases = [
             (
@@ -99,6 +112,105 @@ class QueryIntentTests(unittest.TestCase):
                 intent,
                 "(: $prf (PlaysARoleInDiabetesRisk abebe) $tv)",
             ),
+        )
+
+    def test_denial_predicate_cannot_answer_positive_access_question(self):
+        intent = parse_question_intent("May Omar access the secure archive?")
+
+        self.assertTrue(
+            query_matches_intent(
+                intent,
+                "(: $prf (AccessesSecureArchive omar) $tv)",
+            )
+        )
+        self.assertFalse(
+            query_matches_intent(
+                intent,
+                "(: $prf (IsDeniedArchiveAccess omar) $tv)",
+            )
+        )
+
+    def test_entity_identifier_can_match_compound_kb_entity(self):
+        intent = parse_question_intent("Must batch Q4 be rejected?")
+
+        self.assertTrue(
+            query_matches_intent(
+                intent,
+                "(: $prf (Rejected batch_q4) $tv)",
+            )
+        )
+
+    def test_generic_type_fact_cannot_answer_event_question(self):
+        intent = parse_question_intent("Was the malware alert triggered on Atlas?")
+
+        self.assertTrue(
+            query_matches_intent(
+                intent,
+                "(: $prf (TriggeredMalwareAlert atlas) $tv)",
+            )
+        )
+        self.assertFalse(
+            query_matches_intent(intent, "(: $prf (IsA atlas server) $tv)")
+        )
+
+    def test_subtype_words_are_required_for_query_target(self):
+        intent = parse_question_intent(
+            "Does Lena qualify for a leadership scholarship?"
+        )
+
+        self.assertTrue(
+            query_matches_intent(
+                intent,
+                "(: $prf (QualifiesForLeadershipScholarship lena) $tv)",
+            )
+        )
+        self.assertFalse(
+            query_matches_intent(
+                intent,
+                "(: $prf (QualifiesForMeritScholarship lena) $tv)",
+            )
+        )
+
+    def test_action_word_is_required_when_related_fact_mentions_same_topic(self):
+        intent = parse_question_intent("Did the customer waive the delivery deadline?")
+
+        self.assertTrue(
+            query_matches_intent(
+                intent,
+                "(: $prf (WaivedDeliveryDeadline customer) $tv)",
+            )
+        )
+        self.assertFalse(
+            query_matches_intent(
+                intent,
+                "(: $prf (MissesDeliveryDeadline customer) $tv)",
+            )
+        )
+
+    def test_property_question_requires_property_terms(self):
+        intent = parse_question_intent("Is batch Q4 missing a packaging date?")
+
+        self.assertTrue(
+            query_matches_intent(
+                intent,
+                "(: $prf (MissingPackagingDate batch_q4) $tv)",
+            )
+        )
+        self.assertFalse(
+            query_matches_intent(
+                intent,
+                "(: $prf (ContaminationDetected batch_q4) $tv)",
+            )
+        )
+
+    def test_hyphenated_question_terms_match_compound_predicate(self):
+        intent = parse_question_intent("Has Hana completed online check-in?")
+
+        self.assertTrue(
+            query_matches_intent(
+                intent,
+                "(: $prf (CompletedOnlineCheckIn hana) $tv)",
+            )
         )
 
 

@@ -96,9 +96,13 @@ RUN cd /deps/PeTTaChainer && \
 # Install pln-rag app dependencies
 WORKDIR /app
 ARG REQUIREMENTS_FILE=requirements.txt
+ARG INSTALL_COREF=false
 COPY requirements*.txt ./
 RUN rm -rf /usr/lib/python3/dist-packages/blinker*
 RUN pip3 install --default-timeout=1000 -r ${REQUIREMENTS_FILE}
+RUN if [ "$INSTALL_COREF" = "true" ]; then \
+        pip3 install --default-timeout=1000 -r requirements-coref.txt; \
+    fi
 
 COPY . .
 

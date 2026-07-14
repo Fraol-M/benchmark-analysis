@@ -37,7 +37,7 @@ class QueryResponse(BaseModel):
     pln_query: str
     original_query: str
     executed_query: str
-    query_source: Literal["qdrant_alignment", "parser", "none"] = "none"
+    query_source: Literal["qdrant_alignment", "parser", "deterministic", "none"] = "none"
     fallback_used: bool
     query_status: Literal["well_aligned", "weakly_aligned", "malformed", "no_query"]
     raw_proof: str
@@ -60,6 +60,15 @@ class QueryResponse(BaseModel):
     positive_proof: List[str] = Field(default_factory=list)
     negative_proof: List[str] = Field(default_factory=list)
     requirements: List[Dict[str, Any]] = Field(default_factory=list)
+    canonical_proposition: str = ""
+    target_alignment: Literal["exact", "compatible", "rejected", "none"] = "none"
+    proof_validated: bool = False
+    support_kind: Literal[
+        "entailed", "probabilistic", "explicit_negative", "conflict", "unknown"
+    ] = "unknown"
+    unresolved_mentions: List[Dict[str, Any]] = Field(default_factory=list)
+    normalization_evidence: List[Dict[str, Any]] = Field(default_factory=list)
+    rejection_reasons: List[str] = Field(default_factory=list)
 
 
 #  Reset 
@@ -109,6 +118,9 @@ class DebugIngestRequest(BaseModel):
 
 class DebugIngestChunkResult(BaseModel):
     chunk: str
+    chunk_start: int = 0
+    chunk_end: int = 0
+    coreference: Dict[str, Any] = Field(default_factory=dict)
     context: List[str]
     langextract_postprocessed: LangExtractPostprocessed
     pln_canonicalized: List[str] = Field(default_factory=list)
@@ -120,6 +132,7 @@ class DebugIngestChunkResult(BaseModel):
 class DebugIngestItemResult(BaseModel):
     text: str
     chunks: List[DebugIngestChunkResult] = Field(default_factory=list)
+    coreference: Dict[str, Any] = Field(default_factory=dict)
     status: Literal["success", "failed"]
     error: Optional[str] = None
 
@@ -143,7 +156,7 @@ class DebugQueryResponse(BaseModel):
     pln_canonicalized_queries: List[str] = Field(default_factory=list)
     supporting_statements: List[str] = Field(default_factory=list)
     executed_query: str
-    query_source: Literal["qdrant_alignment", "parser", "none"] = "none"
+    query_source: Literal["qdrant_alignment", "parser", "deterministic", "none"] = "none"
     fallback_used: bool
     query_status: Literal["well_aligned", "weakly_aligned", "malformed", "no_query"]
     proof: str
@@ -155,6 +168,15 @@ class DebugQueryResponse(BaseModel):
     positive_proof: List[str] = Field(default_factory=list)
     negative_proof: List[str] = Field(default_factory=list)
     requirements: List[Dict[str, Any]] = Field(default_factory=list)
+    canonical_proposition: str = ""
+    target_alignment: Literal["exact", "compatible", "rejected", "none"] = "none"
+    proof_validated: bool = False
+    support_kind: Literal[
+        "entailed", "probabilistic", "explicit_negative", "conflict", "unknown"
+    ] = "unknown"
+    unresolved_mentions: List[Dict[str, Any]] = Field(default_factory=list)
+    normalization_evidence: List[Dict[str, Any]] = Field(default_factory=list)
+    rejection_reasons: List[str] = Field(default_factory=list)
 
 
 class DebugQdrantPoint(BaseModel):

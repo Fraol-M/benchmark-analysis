@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass, field
 from typing import List
 
+from core.pln.constraint_normalizer import PLNConstraintNormalizer
 from core.pln.schema_alignment import PLNSchemaAligner
 from core.pln.predicate_registry import PredicateRegistry
 
@@ -64,9 +65,16 @@ class PLNPostprocessor:
     }
     QUERY_MARKERS = {"who", "what", "when", "where", "why", "how", "which"}
 
-    def __init__(self, predicate_registry: PredicateRegistry | None = None):
+    def __init__(
+        self,
+        predicate_registry: PredicateRegistry | None = None,
+        *,
+        allow_semantic_bridges: bool = False,
+    ):
         self._schema_alignment = PLNSchemaAligner(self.STRUCTURAL_HEADS)
+        self._constraint_normalizer = PLNConstraintNormalizer(self.STRUCTURAL_HEADS)
         self._predicate_registry = predicate_registry
+        self._allow_semantic_bridges = allow_semantic_bridges
 
     def set_predicate_card_store(self, card_store) -> None:
         if self._predicate_registry:
@@ -147,7 +155,17 @@ class PLNPostprocessor:
         inferred_types = self.infer_entity_types(processed_statements, proper_name_map)
         processed_statements.extend(inferred_types)
 
-        if self._predicate_registry and not plan_queries:
+        processed_statements, constraint_decisions = self._constraint_normalizer.normalize(
+            processed_statements,
+            source_text=text,
+        )
+        registry_decisions.extend(constraint_decisions)
+
+        if (
+            self._predicate_registry
+            and self._allow_semantic_bridges
+            and not plan_queries
+        ):
             bridges, bridge_decisions = (
                 self._predicate_registry.build_validated_bridges(
                     processed_statements,
@@ -156,6 +174,14 @@ class PLNPostprocessor:
             )
         else:
             bridges, bridge_decisions = [], []
+            if self._predicate_registry and not plan_queries:
+                bridge_decisions.append(
+                    {
+                        "action": "semantic_bridges_suppressed",
+                        "reason": "proof_authority_disabled",
+                        "proof_safe": True,
+                    }
+                )
         processed_statements.extend(bridges)
         alignment_decisions.extend(registry_decisions)
         alignment_decisions.extend(bridge_decisions)
@@ -820,15 +846,30 @@ class PLNPostprocessor:
         statements: List[str],
         context: List[str],
     ) -> List[str]:
-        if not queries:
-            return queries
-
         facts, conclusions = self._schema_alignment.collect_available_signatures(
             statements,
             context,
         )
+        facts.extend(
+            self._schema_alignment.collect_negated_fact_signatures(
+                statements + context
+            )
+        )
         is_yes_no = self.is_yes_no_question(question)
         planned: List[tuple[int, str]] = []
+
+        if not queries:
+            if is_yes_no:
+                semantic_fallback = self.build_semantic_context_fallbacks(
+                    question,
+                    facts,
+                    conclusions,
+                )
+                heuristic = self.build_heuristic_question_queries(question)
+                return self.filter_query_candidates(
+                    self.dedupe_preserve_order(semantic_fallback + heuristic)
+                )
+            return queries
 
         for query in queries:
             parsed = self._schema_alignment.parse_query_signature(query)
@@ -1169,6 +1210,11 @@ class PLNPostprocessor:
             "did",
             "can",
             "could",
+            "may",
+            "might",
+            "must",
+            "shall",
+            "should",
             "has",
             "have",
             "had",
@@ -1195,6 +1241,11 @@ class PLNPostprocessor:
             "did",
             "can",
             "could",
+            "may",
+            "might",
+            "must",
+            "shall",
+            "should",
             "has",
             "have",
             "had",

@@ -24,3 +24,14 @@ Suggested manual workflow:
 Important: this benchmark is designed to reward caution. If a question asks for
 something not explicitly proved by the paragraph or by safe rules extracted from
 it, the correct result is usually `unknown`, not a guessed yes/no answer.
+
+Run all cases with:
+
+```powershell
+python benchmark\run_benchmark.py
+```
+
+Run focused cases while developing with one or more `--case-id` arguments. The
+report separates direct-query accuracy from `unanswered` routing and records
+overclaims, invalid targets, no-query failures, validated-proof rate, and p50/p95
+latency. These metrics are the acceptance signal; overall accuracy alone is not.

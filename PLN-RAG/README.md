@@ -216,6 +216,31 @@ enabled, it may try later parser candidates, but every retry passes through the
 same typed intent gate. Boolean queries return one of four proof states:
 `positive`, `negative`, `both`, or `unknown`.
 
+### Optional document-level coreference
+
+LangExtract ingestion can optionally run LingMess coreference once per original
+document, project cluster mentions into each chunk by character offsets, and
+merge those clusters into the existing mention prepass as prompt hints. It does
+not rewrite source text.
+
+```bash
+python -m pip install -r requirements-coref.txt
+COREFERENCE_ENABLED=true
+COREFERENCE_DEVICE=auto
+```
+
+For Docker, install the optional LingMess dependency during the image build:
+
+```powershell
+$env:PLNRAG_INSTALL_COREF="true"
+$env:COREFERENCE_ENABLED="true"
+docker compose --profile default up --build pln-rag
+```
+
+The default is `COREFERENCE_ENABLED=false`. If LingMess is unavailable or fails
+and `COREFERENCE_FAIL_OPEN=true`, ingestion continues with deterministic mention
+prepass only. See `docs/architecture/coreference.md` for details.
+
 To add a new parser:
 1. Create `parsers/your_parser.py` implementing `SemanticParser`
 2. Register it in `parsers/__init__.py`

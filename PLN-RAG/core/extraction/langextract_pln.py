@@ -53,6 +53,34 @@ _SINGULAR_INVARIANT_WORDS = {
     "ethics",
     "politics",
 }
+_MODAL_HEAD_TERMS = {
+    "can",
+    "could",
+    "may",
+    "might",
+    "possible",
+    "possibly",
+    "potential",
+    "potentially",
+}
+_MAY_UNCERTAINTY_VERBS = {
+    "cause",
+    "causes",
+    "lead",
+    "leads",
+    "result",
+    "results",
+    "trigger",
+    "triggers",
+    "produce",
+    "produces",
+    "increase",
+    "increases",
+    "reduce",
+    "reduces",
+    "indicate",
+    "indicates",
+}
 
 
 @dataclass
@@ -272,6 +300,8 @@ def is_safe_statement_extraction(ext: Any) -> tuple[bool, str]:
             return False, "rule has empty head_predicate"
         if not _has_nonempty(attrs, "body"):
             return False, "rule has empty body"
+        if _has_unencoded_possibility_modal(ext):
+            return False, "modal rule requires modal predicate"
         try:
             _parse_sexp(str(attrs["body"]))
         except Exception as exc:
@@ -301,6 +331,21 @@ def _is_epistemic_negation_without_status(ext: Any) -> bool:
     predicate = str(attrs.get("predicate", "")).lower().replace("_", "-")
     status_terms = {"known", "classified", "diagnosed", "reported", "evidence"}
     return not any(term in predicate for term in status_terms)
+
+
+def _has_unencoded_possibility_modal(ext: Any) -> bool:
+    text = " ".join(_ext_text(ext).lower().split())
+    if not text:
+        return False
+    attrs = _ext_attrs(ext)
+    head = str(attrs.get("head_predicate", "")).lower().replace("_", "-")
+    head_terms = set(re.split(r"[^a-z0-9]+", head))
+    if head_terms.intersection(_MODAL_HEAD_TERMS):
+        return False
+    if re.search(r"\b(can|could|might)\b", text):
+        return True
+    may_match = re.search(r"\bmay\s+(?:\w+\s+){0,2}(\w+)\b", text)
+    return bool(may_match and may_match.group(1) in _MAY_UNCERTAINTY_VERBS)
 
 
 def _truth_value_for_extraction(ext: Any, default: str) -> str:

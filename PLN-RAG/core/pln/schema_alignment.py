@@ -12,6 +12,20 @@ class PLNSchemaAligner:
     BRIDGE_STV = "(STV 0.9 0.8)"
     BRIDGE_MAX_PER_CHUNK = 8
     BRIDGE_MIN_TERM_JACCARD = 0.75
+    COMPARATOR_TERMS = {
+        "above",
+        "at",
+        "least",
+        "below",
+        "under",
+        "less",
+        "more",
+        "than",
+        "over",
+        "greater",
+        "minimum",
+        "maximum",
+    }
     GENERIC_TERMS = {
         "at",
         "be",
@@ -149,6 +163,8 @@ class PLNSchemaAligner:
 
         source_terms = self.normalized_head_terms(source["head"])
         target_terms = self.normalized_head_terms(target["head"])
+        if (source_terms | target_terms) & self.COMPARATOR_TERMS:
+            return False
         overlap = source_terms.intersection(target_terms)
         score = self.bridge_similarity_score(source, target)
         if score < 6 or len(overlap) < 2:

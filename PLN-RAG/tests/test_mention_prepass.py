@@ -44,6 +44,14 @@ class MentionPrepassTests(unittest.TestCase):
             any(mention.canonical == "camera" for mention in result.mentions)
         )
 
+    def test_simple_human_pronoun_does_not_inject_a_mention_id(self):
+        result = MentionPrepass().build(
+            "Hana has a valid passport. She completed online check-in."
+        )
+
+        self.assertEqual([], result.ambiguous_pronouns)
+        self.assertEqual("", result.prompt_hint())
+
 
 if __name__ == "__main__":
     unittest.main()

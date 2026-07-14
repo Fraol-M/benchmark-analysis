@@ -43,6 +43,28 @@ class ReasonerPolarityTests(unittest.TestCase):
 
         self.assertEqual("both", outcome.status)
 
+    def test_synthetic_zero_truth_negation_is_not_a_real_contradiction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            atomspace = Path(directory) / "atomspace.metta"
+            atomspace.write_text(
+                "(: active_fact (HasActiveEmploymentStatus omar) (STV 1.0 1.0))\n",
+                encoding="utf-8",
+            )
+            self.reasoner._atomspace_path = str(atomspace)
+            self.reasoner._background_files = set()
+            self.reasoner.query = lambda query, seed_terms=None: (
+                ["(: false_neg (Not (HasActiveEmploymentStatus omar)) (STV 0.0 1.0))"]
+                if "(Not " in query
+                else ["positive-proof"]
+            )
+
+            outcome = self.reasoner.query_polarity(
+                "(: $prf (HasActiveEmploymentStatus omar) $tv)"
+            )
+
+        self.assertEqual("positive", outcome.status)
+        self.assertEqual([], outcome.negative_proof)
+
     def test_no_positive_or_negative_proof_is_unknown(self):
         self.reasoner.query = lambda query, seed_terms=None: []
 
@@ -51,6 +73,14 @@ class ReasonerPolarityTests(unittest.TestCase):
         )
 
         self.assertEqual("unknown", outcome.status)
+
+    def test_rule_conclusion_requires_exact_arity_match(self):
+        bindings = self.reasoner._match_conclusion(
+            "(: $prf (QualifiesForMeritScholarship lena merit) $tv)",
+            ["QualifiesForMeritScholarship", "$student"],
+        )
+
+        self.assertIsNone(bindings)
 
     def test_factor_explanation_exposes_grounded_rule_requirements(self):
         self.reasoner.get_atoms = lambda: [
@@ -87,6 +117,38 @@ class ReasonerPolarityTests(unittest.TestCase):
         )
 
         self.assertEqual([({}, ["b-proof"])], states)
+
+    def test_negative_rule_premise_requires_explicit_negative_fact(self):
+        self.reasoner._query_exact_fact = lambda query: []
+        self.reasoner._backward_chain = lambda query, seen=None: []
+        self.reasoner._handler = SimpleNamespace(
+            query=lambda *args, **kwargs: ["synthetic-negation-proof"]
+        )
+        self.reasoner._query_timeout = 1
+        self.reasoner._max_steps = 1
+
+        proof = self.reasoner._prove_grounded_premise(
+            ["Not", ["ProvidesWrittenNotice", "bright_ware"]],
+            set(),
+        )
+
+        self.assertEqual([], proof)
+
+    def test_explicit_negative_fact_can_satisfy_negative_rule_premise(self):
+        explicit = (
+            "(: no_notice (Not (ProvidesWrittenNotice bright_ware)) "
+            "(STV 1.0 1.0))"
+        )
+        self.reasoner._query_exact_fact = lambda query: (
+            [explicit] if "(Not (ProvidesWrittenNotice bright_ware))" in query else []
+        )
+
+        proof = self.reasoner._prove_grounded_premise(
+            ["Not", ["ProvidesWrittenNotice", "bright_ware"]],
+            set(),
+        )
+
+        self.assertEqual([explicit], proof)
 
     def test_proof_sources_use_exact_atom_provenance(self):
         atom = "(: online_fact (Online camera_2) (STV 1.0 1.0))"

@@ -1,6 +1,6 @@
 from pydantic_settings import BaseSettings
 from functools import lru_cache
-from pydantic import ConfigDict
+from pydantic import ConfigDict, field_validator
 from typing import Optional
 from pathlib import Path
 
@@ -28,9 +28,22 @@ class Settings(BaseSettings):
     langextract_examples_path: str = "data/langextract_examples.json"
     langextract_extraction_passes: int = 1
     langextract_max_workers: int = 1
+    langextract_cache_enabled: bool = True
+    langextract_cache_max_entries: int = 128
     langextract_skip_fuzzy: bool = True
     langextract_chunk_size: Optional[int] = 2000
     mention_prepass_enabled: bool = True
+
+    # Optional document-level neural coreference. Disabled by default because
+    # LingMess is a large model and proof extraction must fail open.
+    coreference_enabled: bool = False
+    coreference_backend: str = "lingmess"
+    coreference_model: str = "biu-nlp/lingmess-coref"
+    coreference_device: str = "auto"
+    coreference_mode: str = "hint_only"
+    coreference_fail_open: bool = True
+    coreference_max_tokens_in_batch: int = 10000
+    coreference_include_pair_logits: bool = False
 
     # Vector store
     qdrant_url: str = "http://localhost:6333"
@@ -53,6 +66,7 @@ class Settings(BaseSettings):
     # Reasoning
     chaining_timeout: int = 30  # seconds before proof search is killed
     chaining_max_steps: int = 100
+    strict_proof_validation_enabled: bool = True
 
     # Query execution
     query_fallback_enabled: bool = True
@@ -68,6 +82,8 @@ class Settings(BaseSettings):
     predicate_registry_path: str = "data/predicate_registry.json"
     predicate_mapping_enabled: bool = True
     predicate_mapping_llm_enabled: bool = True
+    predicate_mapping_online_enabled: bool = False
+    predicate_mapping_emit_bridges: bool = False
     predicate_mapping_collection: str = "pln_rag_predicates"
     predicate_mapping_top_k: int = 6
     predicate_mapping_max_candidates: int = 6
@@ -81,6 +97,30 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @field_validator("coreference_backend")
+    @classmethod
+    def _validate_coreference_backend(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        if normalized not in {"lingmess"}:
+            raise ValueError("COREFERENCE_BACKEND must be 'lingmess'")
+        return normalized
+
+    @field_validator("coreference_device")
+    @classmethod
+    def _validate_coreference_device(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        if normalized not in {"auto", "cpu", "cuda", "cuda:0"}:
+            raise ValueError("COREFERENCE_DEVICE must be auto, cpu, cuda, or cuda:0")
+        return normalized
+
+    @field_validator("coreference_mode")
+    @classmethod
+    def _validate_coreference_mode(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        if normalized != "hint_only":
+            raise ValueError("COREFERENCE_MODE currently supports only hint_only")
+        return normalized
 
 
 @lru_cache

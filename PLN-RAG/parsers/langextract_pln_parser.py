@@ -5,7 +5,7 @@ from typing import Any, List
 from dataclasses import dataclass, field
 
 from config import get_settings
-from core.discourse import MentionPrepass, MentionPrepassResult
+from core.discourse import ChunkCorefResult, MentionPrepass, MentionPrepassResult
 from core.extraction.langextract_chunker import LangExtractChunker
 from core.extraction.langextract_examples import load_langextract_prompt_spec
 from core.extraction.langextract_pln import (
@@ -62,6 +62,9 @@ class LangExtractPLNParser:
         )
         self._extraction_passes = cfg.langextract_extraction_passes
         self._max_workers = cfg.langextract_max_workers
+        self._cache_enabled = cfg.langextract_cache_enabled
+        self._cache_max_entries = max(1, cfg.langextract_cache_max_entries)
+        self._extraction_cache: dict[tuple[str, str, str], list[Any]] = {}
         self._skip_fuzzy = cfg.langextract_skip_fuzzy
         self._mention_prepass = (
             MentionPrepass() if cfg.mention_prepass_enabled else None
@@ -83,6 +86,7 @@ class LangExtractPLNParser:
                 enabled=(
                     cfg.predicate_mapping_enabled
                     and cfg.predicate_mapping_llm_enabled
+                    and cfg.predicate_mapping_online_enabled
                 ),
                 gemini_api_key=mapping_gemini_key,
                 gemini_model=cfg.gemini_model,
@@ -109,6 +113,7 @@ class LangExtractPLNParser:
             )
         self._postprocessor = PLNPostprocessor(
             predicate_registry=predicate_registry,
+            allow_semantic_bridges=cfg.predicate_mapping_emit_bridges,
         )
 
         if not self._api_key and not self._model_url:
@@ -134,9 +139,14 @@ class LangExtractPLNParser:
         if clear_registry:
             self._postprocessor.reset_registry()
 
-    def parse(self, text: str, context: list[str]) -> ParseResult:
+    def parse(
+        self,
+        text: str,
+        context: list[str],
+        mention_prepass: MentionPrepassResult | None = None,
+    ) -> ParseResult:
         try:
-            mention_prepass = self._build_mention_prepass(text)
+            mention_prepass = mention_prepass or self._build_mention_prepass(text)
             prompt = self._statement_prompt + format_context_hint(
                 context,
                 self._predicate_heads,
@@ -184,8 +194,13 @@ class LangExtractPLNParser:
             print(f"[LangExtractPLNParser] Failed for '{text}': {exc}")
             return ParseResult()
 
-    def debug_parse(self, text: str, context: list[str]) -> dict[str, Any]:
-        mention_prepass = self._build_mention_prepass(text)
+    def debug_parse(
+        self,
+        text: str,
+        context: list[str],
+        mention_prepass: MentionPrepassResult | None = None,
+    ) -> dict[str, Any]:
+        mention_prepass = mention_prepass or self._build_mention_prepass(text)
         prompt = self._statement_prompt + format_context_hint(
             context,
             self._predicate_heads,
@@ -322,6 +337,11 @@ class LangExtractPLNParser:
     def _extract(self, text: str, prompt: str, examples: list[Any]) -> list[Any]:
         import langextract as lx
 
+        cache_key = (self._model_id, text, prompt)
+        cached = self._extraction_cache.get(cache_key) if self._cache_enabled else None
+        if cached is not None:
+            return list(cached)
+
         result = lx.extract(
             text_or_documents=text,
             prompt_description=prompt,
@@ -334,17 +354,45 @@ class LangExtractPLNParser:
             max_workers=self._max_workers,
             show_progress=False,
         )
-        return list(result.extractions) if hasattr(result, "extractions") else []
+        extracted = list(result.extractions) if hasattr(result, "extractions") else []
+        if self._cache_enabled:
+            if len(self._extraction_cache) >= self._cache_max_entries:
+                self._extraction_cache.pop(next(iter(self._extraction_cache)))
+            self._extraction_cache[cache_key] = list(extracted)
+        return extracted
 
     def _remember_predicates(self, heads: list[str]) -> None:
         for head in heads:
             if head not in self._predicate_heads:
                 self._predicate_heads.append(head)
 
-    def _build_mention_prepass(self, text: str) -> MentionPrepassResult:
+    def build_mention_prepass(
+        self,
+        text: str,
+        *,
+        coref_result: ChunkCorefResult | None = None,
+        global_offset: int = 0,
+    ) -> MentionPrepassResult:
+        return self._build_mention_prepass(
+            text,
+            coref_result=coref_result,
+            global_offset=global_offset,
+        )
+
+    def _build_mention_prepass(
+        self,
+        text: str,
+        *,
+        coref_result: ChunkCorefResult | None = None,
+        global_offset: int = 0,
+    ) -> MentionPrepassResult:
         if not self._mention_prepass:
             return MentionPrepassResult()
-        return self._mention_prepass.build(text)
+        return self._mention_prepass.build(
+            text,
+            coref_result=coref_result,
+            global_offset=global_offset,
+        )
 
     def _mention_hint(self, result: MentionPrepassResult) -> str:
         return result.prompt_hint()
