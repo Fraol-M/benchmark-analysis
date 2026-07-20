@@ -82,6 +82,13 @@ class ResetResponse(BaseModel):
     scope: str
 
 
+class RebuildResponse(BaseModel):
+    status: Literal["ok"]
+    atomspace_count: int = 0
+    qdrant_indexed_count: int = 0
+    pending_index_count: int = 0
+
+
 #  Health 
 
 class HealthResponse(BaseModel):
@@ -89,6 +96,9 @@ class HealthResponse(BaseModel):
     parser: str
     atomspace_size: int
     vectordb_count: int
+    evidence_document_count: int = 0
+    evidence_claim_count: int = 0
+    pending_index_count: int = 0
     uptime_seconds: float
 
 
@@ -125,6 +135,7 @@ class DebugIngestChunkResult(BaseModel):
     langextract_postprocessed: LangExtractPostprocessed
     pln_canonicalized: List[str] = Field(default_factory=list)
     atomspace_added: List[str] = Field(default_factory=list)
+    evidence_records: List[Dict[str, Any]] = Field(default_factory=list)
     schema_alignment: List[Dict[str, Any]] = Field(default_factory=list)
     predicate_registry: List[Dict[str, Any]] = Field(default_factory=list)
 
@@ -190,3 +201,6 @@ class DebugQdrantResponse(BaseModel):
     points: List[DebugQdrantPoint] = Field(default_factory=list)
     predicate_count: int = 0
     predicate_points: List[DebugQdrantPoint] = Field(default_factory=list)
+    evidence_document_count: int = 0
+    evidence_claim_count: int = 0
+    pending_index_count: int = 0

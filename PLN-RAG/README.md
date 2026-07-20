@@ -6,12 +6,22 @@ stores facts in a PeTTaChainer atomspace, and answers questions via logical proo
 
 ## Architecture
 
+```text
+Text -> Chunker -> mention prepass -> LangExtract -> PLN postprocessor
+                                                    |
+                                                    v
+                                      SQLite evidence ledger
+                                      /                    \
+                         Qdrant claim index          PeTTaChainer
+                                 |                         |
+Question -> evidence retrieval -> gated target -> proof -> Answer
 ```
-Text -> Chunker -> mention prepass -> LangExtract -> PLN postprocessor -> PeTTaChainer -> Answer
-                                                 |                    ^
-                                                 v                    |
-                                     Predicate cards -> Qdrant -> validated mapping graph
-```
+
+SQLite is the authoritative store for documents, exact evidence spans, claims,
+and transformation lineage. Qdrant contains rebuildable natural-language search
+records, one per validated claim/evidence target. PeTTaChainer is rebuilt from
+accepted and traceable derived claims. Retrieval proposes proof targets but
+never establishes truth by similarity.
 
 ## Project layout
 
@@ -20,7 +30,7 @@ Text -> Chunker -> mention prepass -> LangExtract -> PLN postprocessor -> PeTTaC
 | `api/` | FastAPI routes and response/request models |
 | `core/` | Runtime pipeline: extraction, PLN cleanup, query planning, reasoning, and answering |
 | `parsers/` | LangExtract parser integration |
-| `storage/` | Qdrant/Ollama vector store adapter |
+| `storage/` | SQLite evidence ledger and Qdrant/Ollama index adapters |
 | `debug_ui/` | Streamlit inspection UI |
 | `tests/` | Automatic unit and safety tests |
 | `tests/manual/` | Manual experiments that may require live LLM/Ollama/Qdrant services |
@@ -65,19 +75,30 @@ cp .env.example .env
 # Fill in OPENAI_API_KEY or GEMINI_API_KEY
 # OLLAMA_URL can stay as localhost in .env; docker-compose overrides it for containers
 
-# PLN/NL2PLN-based track (canonical_pln, nl2pln, manhin)
-docker compose --profile pln up --build
+# Full LangExtract stack: API, Qdrant, and Ollama
+docker compose --profile default up --build
 
-# LangExtract track
-docker compose --profile langextract up --build
+# API-only light profile without Qdrant/Ollama retrieval
+docker compose --profile light up --build
 
 ```
 
-The API will be available at http://localhost:8000 (PLN track)
-or http://localhost:8001 (LangExtract track).
-The light LangExtract track also uses http://localhost:8001 and must be run
-on its own.
-Interactive docs: http://localhost:8000/docs or http://localhost:8001/docs.
+The full API is available at http://localhost:8000. The light profile uses
+http://localhost:8001. Interactive docs are available at `/docs` on either
+port.
+
+### Rebuild derived indexes
+
+After changing Qdrant schema or recovering a deleted Atomspace/Qdrant index,
+rebuild both projections from SQLite:
+
+```bash
+curl -X POST http://localhost:8000/rebuild
+```
+
+Legacy chunk-level Qdrant points are intentionally excluded from executable
+query alignment. Re-ingest source documents to create evidence-linked v2
+records in `pln_rag_evidence_v2`.
 
 > **Linux note:** `host.docker.internal` is not automatically available on Linux.
 > The `docker-compose.yml` already includes `extra_hosts: host.docker.internal:host-gateway`

@@ -1,5 +1,8 @@
 import uuid
 import httpx
+import hashlib
+import math
+import re
 from collections import OrderedDict
 from typing import Any, List, Tuple
 from config import get_settings
@@ -9,8 +12,8 @@ class VectorStore:
     """
     Manages NL ↔ PLN atom mappings in Qdrant.
 
-    Stores: { nl: sentence, pln: [atoms] } per ingested sentence.
-    Retrieves: relevant PLN atoms to use as parser context.
+    Stores one vector point per validated claim-evidence target. The vector is
+    built from natural-language evidence; PLN remains structured payload.
     """
 
     def __init__(self):
@@ -24,6 +27,7 @@ class VectorStore:
         self._collection_sizes: dict[str, int] = {}
         self._embedding_cache: OrderedDict[str, List[float]] = OrderedDict()
         self._embedding_cache_size = 256
+        self._hybrid_enabled = cfg.qdrant_hybrid_enabled
 
     def embed(self, text: str) -> List[float]:
         cached = self._embedding_cache.get(text)
@@ -92,6 +96,28 @@ class VectorStore:
                 ).raise_for_status()
         self._collection_sizes[collection] = vector_size
 
+    def _ensure_evidence_collection(self, vector_size: int) -> None:
+        cache_key = f"{self._collection}:evidence_v2"
+        if self._collection_sizes.get(cache_key) == vector_size:
+            return
+        try:
+            self._client.get(
+                f"{self._qdrant}/collections/{self._collection}"
+            ).raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            self._client.put(
+                f"{self._qdrant}/collections/{self._collection}",
+                json={
+                    "vectors": {
+                        "dense": {"size": vector_size, "distance": "Cosine"}
+                    },
+                    "sparse_vectors": {"lexical": {}},
+                },
+            ).raise_for_status()
+        self._collection_sizes[cache_key] = vector_size
+
     def store(
         self,
         sentence: str,
@@ -100,21 +126,68 @@ class VectorStore:
         metadata: dict[str, Any] | None = None,
         query_targets: List[str] | None = None,
     ):
-        self._ensure_collection(self._collection, len(vector))
         payload: dict[str, Any] = {
             "nl": sentence,
+            "original_text": sentence,
+            "retrieval_text": sentence,
             "pln": atoms,
             "query_targets": query_targets or [],
+            "validation_state": "accepted",
+            "schema_version": 1,
         }
         if metadata:
             payload["metadata"] = metadata
+        payload["index_id"] = str(uuid.uuid4())
+        self._upsert_evidence_records([payload], [vector])
+
+    def store_claim_records(self, records: List[dict[str, Any]]) -> None:
+        """Index source-linked records emitted by the evidence ledger outbox."""
+        prepared = [
+            dict(record)
+            for record in records
+            if record.get("index_id")
+            and record.get("validation_state") == "accepted"
+            and str(record.get("retrieval_text") or "").strip()
+        ]
+        if not prepared:
+            return
+        vectors = self.embed_many(
+            [str(record["retrieval_text"]) for record in prepared]
+        )
+        self._upsert_evidence_records(prepared, vectors)
+
+    def _upsert_evidence_records(
+        self,
+        records: List[dict[str, Any]],
+        vectors: List[List[float]],
+    ) -> None:
+        if not records or not vectors:
+            return
+        self._ensure_evidence_collection(len(vectors[0]))
+        points: List[dict[str, Any]] = []
+        for record, vector in zip(records, vectors):
+            index_id = str(record.get("index_id") or uuid.uuid4())
+            payload = {key: value for key, value in record.items() if key != "outbox_id"}
+            points.append(
+                {
+                    "id": str(
+                        uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"{self._collection}:{index_id}",
+                        )
+                    ),
+                    "vector": {
+                        "dense": vector,
+                        "lexical": self._sparse_vector(
+                            str(record.get("retrieval_text") or "")
+                        ),
+                    },
+                    "payload": payload,
+                }
+            )
         self._client.put(
             f"{self._qdrant}/collections/{self._collection}/points?wait=true",
-            json={"points": [{
-                "id": str(uuid.uuid4()),
-                "vector": vector,
-                "payload": payload
-            }]}
+            json={"points": points},
         ).raise_for_status()
 
     def search(
@@ -124,17 +197,44 @@ class VectorStore:
         min_score: float | None = None,
     ) -> Tuple[List[dict[str, Any]], List[float]]:
         vector = self.embed(text)
-        self._ensure_collection(self._collection, len(vector))
+        self._ensure_evidence_collection(len(vector))
 
-        resp = self._client.post(
-            f"{self._qdrant}/collections/{self._collection}/points/search",
-            json={"vector": vector, "limit": top_k, "with_payload": True}
-        )
+        score_kind = "dense_cosine"
+        if self._hybrid_enabled:
+            resp = self._client.post(
+                f"{self._qdrant}/collections/{self._collection}/points/query",
+                json={
+                    "prefetch": [
+                        {
+                            "query": vector,
+                            "using": "dense",
+                            "limit": max(top_k * 3, top_k),
+                        },
+                        {
+                            "query": self._sparse_vector(text),
+                            "using": "lexical",
+                            "limit": max(top_k * 3, top_k),
+                        },
+                    ],
+                    "query": {"rrf": {}},
+                    "limit": top_k,
+                    "with_payload": True,
+                },
+            )
+            if resp.status_code == 200:
+                score_kind = "hybrid_rrf"
+        else:
+            resp = self._dense_search(vector, top_k)
+        if resp.status_code != 200 and self._hybrid_enabled:
+            resp = self._dense_search(vector, top_k)
         if resp.status_code != 200:
             return [], vector
 
         matches: List[dict[str, Any]] = []
-        for item in resp.json().get("result", []):
+        result = resp.json().get("result", [])
+        if isinstance(result, dict):
+            result = result.get("points", [])
+        for item in result:
             score = item.get("score", 0)
             if min_score is not None and score < min_score:
                 continue
@@ -142,14 +242,46 @@ class VectorStore:
             matches.append(
                 {
                     "score": score,
+                    "score_kind": score_kind,
                     "nl": payload.get("nl", ""),
                     "pln": payload.get("pln", []),
                     "query_targets": payload.get("query_targets", []),
                     "metadata": payload.get("metadata", {}),
+                    "claim_id": payload.get("claim_id", ""),
+                    "evidence_id": payload.get("evidence_id", ""),
+                    "claim_evidence_id": payload.get("claim_evidence_id", ""),
+                    "predicate": payload.get("predicate", ""),
+                    "arguments": payload.get("arguments", []),
+                    "polarity": payload.get("polarity", "positive"),
+                    "validation_state": payload.get("validation_state", ""),
+                    "source_start": payload.get("source_start"),
+                    "source_end": payload.get("source_end"),
                 }
             )
 
         return matches, vector
+
+    def _dense_search(self, vector: List[float], top_k: int) -> httpx.Response:
+        return self._client.post(
+            f"{self._qdrant}/collections/{self._collection}/points/search",
+            json={
+                "vector": {"name": "dense", "vector": vector},
+                "limit": top_k,
+                "with_payload": True,
+            },
+        )
+
+    def _sparse_vector(self, text: str) -> dict[str, List[float] | List[int]]:
+        counts: dict[int, int] = {}
+        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]*", text.lower()):
+            digest = hashlib.sha256(token.encode("utf-8")).digest()
+            index = int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
+            counts[index] = counts.get(index, 0) + 1
+        indices = sorted(counts)
+        return {
+            "indices": indices,
+            "values": [1.0 + math.log(counts[index]) for index in indices],
+        }
 
     def retrieve_context(self, text: str, top_k: int) -> Tuple[List[str], List[float]]:
         """
@@ -158,10 +290,15 @@ class VectorStore:
         """
         matches, vector = self.search(text, top_k=top_k)
         context: List[str] = []
+        seen: set[str] = set()
         for item in matches:
             pln = item.get("pln", [])
             if isinstance(pln, list):
-                context.extend(pln)
+                for atom in pln:
+                    clean = " ".join(str(atom).split())
+                    if clean and clean not in seen:
+                        seen.add(clean)
+                        context.append(clean)
 
         return context, vector
 
@@ -322,6 +459,17 @@ class VectorStore:
             except Exception:
                 pass
         self._collection_sizes.clear()
+
+    def reset_evidence(self) -> None:
+        try:
+            self._client.delete(f"{self._qdrant}/collections/{self._collection}")
+        except Exception:
+            pass
+        self._collection_sizes = {
+            key: value
+            for key, value in self._collection_sizes.items()
+            if not key.startswith(self._collection)
+        }
 
     @property
     def count(self) -> int:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, List
 from dataclasses import dataclass, field
 
@@ -411,13 +412,71 @@ def _remap_metadata(
     metadata: dict[str, dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
     remapped: dict[str, dict[str, Any]] = {}
-    for index, item in enumerate(after):
+    unmatched_before: set[str] = set(before)
+    unmatched_after: list[str] = []
+    for item in after:
         if item in metadata:
-            remapped[item] = metadata[item]
+            remapped[item] = {
+                **metadata[item],
+                "lineage_relation": "extracted_from",
+                "lineage_score": 1.0,
+            }
+            unmatched_before.discard(item)
             continue
-        if index < len(before) and before[index] in metadata:
-            remapped[item] = metadata[before[index]]
+        unmatched_after.append(item)
+
+    # Normalization can rename or reformat an atom. Preserve provenance only
+    # when its structural token set has one strong, unique source match. This
+    # avoids the previous positional mapping, which could assign a later source
+    # to an inferred or reordered atom.
+    candidates: list[tuple[float, str, str]] = []
+    for item in unmatched_after:
+        after_tokens = _lineage_tokens(item)
+        if not after_tokens:
+            continue
+        for source_item in unmatched_before:
+            if source_item not in metadata:
+                continue
+            before_tokens = _lineage_tokens(source_item)
+            union = before_tokens | after_tokens
+            score = len(before_tokens & after_tokens) / len(union) if union else 0.0
+            if score >= 0.72:
+                candidates.append((score, item, source_item))
+
+    used_after: set[str] = set()
+    used_before: set[str] = set()
+    for score, item, source_item in sorted(candidates, reverse=True):
+        if item in used_after or source_item in used_before:
+            continue
+        remapped[item] = {
+            **metadata[source_item],
+            "lineage_relation": "normalized_from",
+            "lineage_score": round(score, 4),
+            "source_atom": source_item,
+        }
+        used_after.add(item)
+        used_before.add(source_item)
     return remapped
+
+
+def _lineage_tokens(statement: str) -> set[str]:
+    clean = " ".join(str(statement).split())
+    clean = re.sub(r"^\(:\s+[^\s()]+\s+", "", clean)
+    clean = re.sub(r"\(STV\s+[^()]+\)\s*\)?$", "", clean)
+    ignored = {
+        "implication",
+        "premises",
+        "conclusions",
+        "stv",
+        "not",
+        "and",
+        "or",
+    }
+    return {
+        token.lower()
+        for token in re.findall(r"[$?]?[A-Za-z][A-Za-z0-9_]*|[0-9]+", clean)
+        if token.lower() not in ignored
+    }
 
 
 __all__ = [

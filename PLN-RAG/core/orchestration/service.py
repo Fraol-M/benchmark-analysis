@@ -29,6 +29,8 @@ from core.discourse import (
     project_coref_to_chunk,
 )
 from core.extraction.langextract_chunker import TextChunk
+from core.evidence import ClaimEvidenceRecord, build_claim_evidence_record
+from storage.evidence_ledger import EvidenceLedger
 from storage.vector_store import VectorStore
 from api.models import (
     IngestItemResult,
@@ -61,6 +63,15 @@ class PLNRAGService:
         self._coreference_enabled = cfg.coreference_enabled
         self._coreference_fail_open = cfg.coreference_fail_open
         self._coreference_resolver = self._create_coreference_resolver(cfg)
+        self._evidence_ledger = (
+            EvidenceLedger(cfg.evidence_ledger_path)
+            if cfg.evidence_ledger_enabled
+            else None
+        )
+        self._evidence_outbox_batch_size = cfg.evidence_outbox_batch_size
+        if self._evidence_ledger and self._evidence_ledger.claim_count:
+            self._rebuild_reasoner_from_ledger()
+        self._flush_evidence_index()
 
     def _create_coreference_resolver(self, cfg) -> CoreferenceResolver:
         if not cfg.coreference_enabled:
@@ -97,6 +108,99 @@ class PLNRAGService:
                 return NullCoreferenceResolver()
             raise
 
+    def _record_chunk_claims(
+        self,
+        *,
+        document_id: str,
+        chunk: TextChunk,
+        statements: List[str],
+        metadata: dict,
+    ) -> List[ClaimEvidenceRecord]:
+        ledger = getattr(self, "_evidence_ledger", None)
+        if not ledger:
+            return []
+        mention_prepass = metadata.get("mention_prepass", {})
+        evidence_id = ledger.record_evidence(
+            document_id=document_id,
+            chunk_index=chunk.index,
+            start_pos=chunk.start,
+            end_pos=chunk.end,
+            text=chunk.text,
+            coreference=mention_prepass.get("coreference", {}),
+        )
+        source_map = metadata.get("statement_to_source", {})
+        records = [
+            build_claim_evidence_record(
+                document_id=document_id,
+                evidence_id=evidence_id,
+                atom=statement,
+                chunk_text=chunk.text,
+                chunk_index=chunk.index,
+                chunk_start=chunk.start,
+                source=source_map.get(statement),
+                mention_prepass=mention_prepass,
+            )
+            for statement in statements
+        ]
+        ledger.record_claims(records)
+        return records
+
+    def _reasoner_inputs(
+        self,
+        statements: List[str],
+        records: List[ClaimEvidenceRecord],
+        fallback_provenance: dict,
+    ) -> tuple[List[str], dict[str, dict]]:
+        if not getattr(self, "_evidence_ledger", None):
+            return statements, fallback_provenance
+        eligible = [record for record in records if record.is_reasoner_eligible]
+        return (
+            [record.atom for record in eligible],
+            {record.atom: record.source_metadata() for record in eligible},
+        )
+
+    def _flush_evidence_index(self) -> int:
+        ledger = getattr(self, "_evidence_ledger", None)
+        vector_store = getattr(self, "_vector_store", None)
+        if not ledger or not vector_store:
+            return 0
+        records = ledger.pending_index_records(
+            limit=getattr(self, "_evidence_outbox_batch_size", 256),
+        )
+        if not records:
+            return 0
+        outbox_ids = [int(record["outbox_id"]) for record in records]
+        try:
+            vector_store.store_claim_records(records)
+            ledger.mark_indexed(outbox_ids)
+            return len(records)
+        except Exception as exc:
+            ledger.mark_index_failed(outbox_ids, str(exc))
+            print(f"[EvidenceIndex] deferred {len(records)} records: {exc}")
+            return 0
+
+    def _retrieve_ingest_context(self, text: str) -> tuple[List[str], List[float]]:
+        vector_store = getattr(self, "_vector_store", None)
+        if not vector_store:
+            return [], []
+        try:
+            return vector_store.retrieve_context(text, top_k=self._context_top_k)
+        except Exception as exc:
+            print(f"[VectorStore] ingest context unavailable; continuing: {exc}")
+            return [], []
+
+    def _rebuild_reasoner_from_ledger(self) -> int:
+        ledger = getattr(self, "_evidence_ledger", None)
+        if not ledger:
+            return 0
+        rows = ledger.reasoner_records()
+        self._reasoner.reset()
+        if not rows:
+            return 0
+        statements = [row["atom"] for row in rows]
+        provenance = {row["atom"]: row["source"] for row in rows}
+        return len(self._reasoner.add_statements(statements, provenance=provenance))
+
     #  Ingest
 
     async def ingest_batch(self, texts: List[str]) -> List[IngestItemResult]:
@@ -126,8 +230,11 @@ class PLNRAGService:
             # 1. Chunk large texts
             chunks = self._chunk_document(text)
             document_coref = self._resolve_document_coref(text)
+            ledger = getattr(self, "_evidence_ledger", None)
+            document_id = ledger.record_document(text) if ledger else ""
             all_atoms: List[str] = []
             parser_calls = 0
+            rejected_samples: List[str] = []
 
             for chunk in chunks:
                 chunk_text = chunk.text
@@ -136,12 +243,7 @@ class PLNRAGService:
                     document_coref,
                 )
                 # 2. Retrieve context from atomspace + vector store
-                if self._vector_store:
-                    context, vector = self._vector_store.retrieve_context(
-                        chunk_text, top_k=self._context_top_k
-                    )
-                else:
-                    context, vector = [], []
+                context, vector = self._retrieve_ingest_context(chunk_text)
                 # Also supplement with recent atoms from disk
                 context = self._enrich_context(context)
 
@@ -153,16 +255,35 @@ class PLNRAGService:
                     print(f"[Service] No statements for chunk: '{chunk_text[:60]}...'")
                     continue
 
-                # 4. Add to atomspace via reasoner
-                added = self._reasoner.add_statements(
-                    parse_result.statements,
-                    provenance=parse_result.metadata.get("statement_to_source", {}),
+                # 4. Validate and record claim/evidence lineage before indexing.
+                records = self._record_chunk_claims(
+                    document_id=document_id,
+                    chunk=chunk,
+                    statements=parse_result.statements,
+                    metadata=parse_result.metadata,
                 )
-                
+                reasoner_statements, provenance = self._reasoner_inputs(
+                    parse_result.statements,
+                    records,
+                    parse_result.metadata.get("statement_to_source", {}),
+                )
+                rejected_samples.extend(
+                    f"{record.atom}: {'; '.join(record.validation_errors)}"
+                    for record in records
+                    if record.validation_state == "quarantined"
+                )
+
+                # 5. Add only accepted or traceable derived claims to Atomspace.
+                added = self._reasoner.add_statements(
+                    reasoner_statements,
+                    provenance=provenance,
+                )
+
                 all_atoms.extend(added)
 
-                # 5. Store in vector DB for future context retrieval
-                if added and self._vector_store:
+                # 6. Legacy path only. Evidence-ledger records are indexed from
+                # the transactional outbox and contain one target per point.
+                if added and self._vector_store and not ledger:
                     self._vector_store.store(
                         chunk_text,
                         added,
@@ -170,6 +291,7 @@ class PLNRAGService:
                         metadata=parse_result.metadata,
                         query_targets=extract_query_targets(added),
                     )
+                self._flush_evidence_index()
 
             return IngestItemResult(
                 text=text,
@@ -177,6 +299,8 @@ class PLNRAGService:
                 status="success",
                 chunk_count=len(chunks),
                 parser_calls=parser_calls,
+                rejected_count=len(rejected_samples),
+                rejected_samples=rejected_samples[:10],
             )
 
         except Exception as e:
@@ -189,6 +313,8 @@ class PLNRAGService:
         try:
             chunks = self._chunk_document(text)
             document_coref = self._resolve_document_coref(text)
+            ledger = getattr(self, "_evidence_ledger", None)
+            document_id = ledger.record_document(text) if ledger else ""
             chunk_results: List[DebugIngestChunkResult] = []
 
             for chunk in chunks:
@@ -197,12 +323,7 @@ class PLNRAGService:
                     chunk,
                     document_coref,
                 )
-                if self._vector_store:
-                    context, vector = self._vector_store.retrieve_context(
-                        chunk_text, top_k=self._context_top_k
-                    )
-                else:
-                    context, vector = [], []
+                context, vector = self._retrieve_ingest_context(chunk_text)
                 context = self._enrich_context(context)
 
                 debug_info = self._debug_parse_chunk(
@@ -224,16 +345,28 @@ class PLNRAGService:
                         "canonicalization_context",
                         {},
                     ),
+                    "mention_prepass": langextract_info.get("mention_prepass", {}),
                     "schema_alignment": schema_alignment,
                     "predicate_registry": predicate_registry,
                 }
 
-                added = self._reasoner.add_statements(
+                records = self._record_chunk_claims(
+                    document_id=document_id,
+                    chunk=chunk,
+                    statements=pln_canonicalized,
+                    metadata=debug_metadata,
+                )
+                reasoner_statements, provenance = self._reasoner_inputs(
                     pln_canonicalized,
-                    provenance=debug_metadata.get("statement_to_source", {}),
+                    records,
+                    debug_metadata.get("statement_to_source", {}),
+                )
+                added = self._reasoner.add_statements(
+                    reasoner_statements,
+                    provenance=provenance,
                 )
 
-                if added and self._vector_store:
+                if added and self._vector_store and not ledger:
                     self._vector_store.store(
                         chunk_text,
                         added,
@@ -241,6 +374,7 @@ class PLNRAGService:
                         metadata=debug_metadata,
                         query_targets=extract_query_targets(added),
                     )
+                self._flush_evidence_index()
 
                 chunk_results.append(
                     DebugIngestChunkResult(
@@ -254,6 +388,7 @@ class PLNRAGService:
                         ),
                         pln_canonicalized=pln_canonicalized,
                         atomspace_added=added,
+                        evidence_records=[record.ledger_dict() for record in records],
                         schema_alignment=schema_alignment,
                         predicate_registry=predicate_registry,
                     )
@@ -379,7 +514,11 @@ class PLNRAGService:
     ) -> tuple[List[str], List[dict]]:
         if not self._vector_store:
             return [], []
-        matches, _ = self._vector_store.search(text, top_k=top_k)
+        try:
+            matches, _ = self._vector_store.search(text, top_k=top_k)
+        except Exception as exc:
+            print(f"[VectorStore] query context unavailable; continuing: {exc}")
+            return [], []
         context: List[str] = []
         for item in matches:
             pln = item.get("pln", [])
@@ -390,16 +529,30 @@ class PLNRAGService:
     def _alignment_matches(self, matches: List[dict]) -> List[dict]:
         cfg = get_settings()
         min_score = float(getattr(cfg, "query_alignment_min_score", 0.0) or 0.0)
+        hybrid_min_score = float(
+            getattr(cfg, "query_alignment_hybrid_min_score", min_score) or 0.0
+        )
         return [
             match
             for match in matches
-            if float(match.get("score") or 0.0) >= min_score
+            if float(match.get("score") or 0.0) >= (
+                hybrid_min_score
+                if match.get("score_kind") == "hybrid_rrf"
+                else min_score
+            )
+            and (
+                not getattr(self, "_evidence_ledger", None)
+                or (
+                    match.get("validation_state") == "accepted"
+                    and bool(match.get("claim_evidence_id"))
+                )
+            )
         ]
 
     def _query_candidates(
         self,
         question: str,
-        _qdrant_queries: List[str],
+        qdrant_queries: List[str],
         parser_queries: List[str],
         trusted_queries: List[str] | None = None,
     ) -> List[tuple[str, str]]:
@@ -410,10 +563,15 @@ class PLNRAGService:
             question,
             parser_queries,
         )
-        # Retrieval supplies context and vocabulary, never proof targets.
-        # A candidate rejected by the intent gate must not be restored.
+        filtered_qdrant = filter_queries_by_question_intent(
+            question,
+            qdrant_queries,
+        )
+        # Qdrant candidates originate from accepted claim-evidence records.
+        # They still pass the same intent and KB arity gates as parser output.
         for source, queries in (
             ("deterministic", trusted_queries or []),
+            ("qdrant_alignment", filtered_qdrant),
             ("parser", filtered_parser),
         ):
             for query in queries:
@@ -1138,17 +1296,49 @@ class PLNRAGService:
             self._parser.reset(clear_registry=scope == "all")
         if scope in ("all", "vectordb") and self._vector_store:
             self._vector_store.reset()
+        ledger = getattr(self, "_evidence_ledger", None)
+        if scope == "all" and ledger:
+            ledger.reset()
+
+    def rebuild_indexes(self) -> dict:
+        ledger = getattr(self, "_evidence_ledger", None)
+        if not ledger:
+            return {
+                "atomspace_count": 0,
+                "qdrant_indexed_count": 0,
+                "pending_index_count": 0,
+            }
+        atomspace_count = self._rebuild_reasoner_from_ledger()
+        indexed_count = 0
+        if self._vector_store:
+            self._vector_store.reset_evidence()
+            ledger.requeue_indexes()
+            while ledger.pending_count:
+                indexed = self._flush_evidence_index()
+                if indexed <= 0:
+                    break
+                indexed_count += indexed
+        return {
+            "atomspace_count": atomspace_count,
+            "qdrant_indexed_count": indexed_count,
+            "pending_index_count": ledger.pending_count,
+        }
 
     #  Health
 
     def health(self) -> dict:
+        ledger = getattr(self, "_evidence_ledger", None)
         return {
             "atomspace_size": self._reasoner.size,
             "vectordb_count": self._vector_store.count if self._vector_store else 0,
             "parser": self._parser.__class__.__name__,
+            "evidence_document_count": ledger.document_count if ledger else 0,
+            "evidence_claim_count": ledger.claim_count if ledger else 0,
+            "pending_index_count": ledger.pending_count if ledger else 0,
         }
 
     def debug_qdrant(self, limit: int = 50) -> dict:
+        ledger = getattr(self, "_evidence_ledger", None)
         if not self._vector_store:
             return {
                 "enabled": False,
@@ -1156,6 +1346,9 @@ class PLNRAGService:
                 "points": [],
                 "predicate_count": 0,
                 "predicate_points": [],
+                "evidence_document_count": ledger.document_count if ledger else 0,
+                "evidence_claim_count": ledger.claim_count if ledger else 0,
+                "pending_index_count": ledger.pending_count if ledger else 0,
             }
         capped_limit = max(1, min(limit, 200))
         return {
@@ -1166,4 +1359,7 @@ class PLNRAGService:
             "predicate_points": self._vector_store.list_predicate_points(
                 limit=capped_limit
             ),
+            "evidence_document_count": ledger.document_count if ledger else 0,
+            "evidence_claim_count": ledger.claim_count if ledger else 0,
+            "pending_index_count": ledger.pending_count if ledger else 0,
         }

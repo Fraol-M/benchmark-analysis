@@ -47,10 +47,17 @@ class Settings(BaseSettings):
 
     # Vector store
     qdrant_url: str = "http://localhost:6333"
-    qdrant_collection: str = "pln_rag"
+    qdrant_collection: str = "pln_rag_evidence_v2"
     ollama_url: str = "http://localhost:11434/api/embeddings"
     ollama_model: str = "nomic-embed-text"
     use_vector_store: bool = True
+    qdrant_hybrid_enabled: bool = True
+
+    # Authoritative evidence and claim ledger. Qdrant and Atomspace are
+    # rebuildable projections of this local database.
+    evidence_ledger_enabled: bool = True
+    evidence_ledger_path: str = "data/evidence/evidence.db"
+    evidence_outbox_batch_size: int = 256
 
     # Atomspace persistence
     atomspace_path: str = "data/atomspace/kb.metta"
@@ -73,6 +80,7 @@ class Settings(BaseSettings):
     query_alignment_enabled: bool = True
     query_alignment_top_k: int = 8
     query_alignment_min_score: float = 0.55
+    query_alignment_hybrid_min_score: float = 0.30
     query_candidate_max_tries: int = 5
     answer_generation_enabled: bool = True
     source_lookup_max_atoms: int = 0

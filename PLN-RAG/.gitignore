@@ -16,6 +16,7 @@ __pycache__/
 # Data / atomspace (runtime generated)
 data/atomspace/
 data/faiss/
+data/evidence/
 
 # IDE
 .vscode/

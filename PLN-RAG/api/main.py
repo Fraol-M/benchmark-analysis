@@ -6,6 +6,7 @@ from api.models import (
     IngestRequest, IngestResponse,
     QueryRequest, QueryResponse,
     ResetRequest, ResetResponse,
+    RebuildResponse,
     HealthResponse,
     DebugIngestRequest, DebugIngestResponse,
     DebugQueryRequest, DebugQueryResponse,
@@ -83,6 +84,12 @@ async def reset(req: ResetRequest = ResetRequest()):
     return ResetResponse(status="ok", scope=req.scope)
 
 
+@app.post("/rebuild", response_model=RebuildResponse)
+async def rebuild():
+    """Rebuild Atomspace and the Qdrant evidence index from SQLite."""
+    return RebuildResponse(status="ok", **get_service().rebuild_indexes())
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health():
     """Service health check — returns component status and sizes."""
@@ -93,6 +100,9 @@ async def health():
         parser=info["parser"],
         atomspace_size=info["atomspace_size"],
         vectordb_count=info["vectordb_count"],
+        evidence_document_count=info["evidence_document_count"],
+        evidence_claim_count=info["evidence_claim_count"],
+        pending_index_count=info["pending_index_count"],
         uptime_seconds=round(time.time() - _start_time, 1),
     )
 

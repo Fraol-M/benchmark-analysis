@@ -47,6 +47,7 @@ class Reasoner:
         self._lock = threading.Lock()
         self._handler = PeTTaChainer()
         self._background_files: set[str] = set()
+        self._atom_keys: set[str] = set()
         self._load_from_disk()
 
     def _load_from_disk(self):
@@ -60,6 +61,7 @@ class Reasoner:
                 if atom:
                     try:
                         self._handler.add_atom(atom)
+                        self._atom_keys.add(atom)
                     except Exception as e:
                         print(f"[Reasoner] Warning: skipping atom '{atom}': {e}")
         print("[Reasoner] Atomspace loaded.")
@@ -76,15 +78,25 @@ class Reasoner:
         added = []
         provenance = provenance or {}
         with self._lock:
+            existing = getattr(self, "_atom_keys", None)
+            if existing is None:
+                existing = set()
+                self._atom_keys = existing
+            if not existing and os.path.exists(self._atomspace_path):
+                with open(self._atomspace_path, "r", encoding="utf-8") as current:
+                    existing.update(line.strip() for line in current if line.strip())
             with open(self._atomspace_path, "a", encoding="utf-8") as f, open(
                 self._provenance_path, "a", encoding="utf-8"
             ) as provenance_file:
                 for stmt in statements:
                     clean = " ".join(stmt.split())
+                    if clean in existing:
+                        continue
                     try:
                         self._handler.add_atom(clean)
                         f.write(clean + "\n")
                         added.append(clean)
+                        existing.add(clean)
                         source = provenance.get(stmt) or provenance.get(clean)
                         if source:
                             provenance_file.write(
@@ -424,6 +436,7 @@ class Reasoner:
         with self._lock:
             self._handler = PeTTaChainer()
             self._background_files = set()
+            self._atom_keys = set()
             if os.path.exists(self._atomspace_path):
                 os.remove(self._atomspace_path)
             if os.path.exists(self._provenance_path):

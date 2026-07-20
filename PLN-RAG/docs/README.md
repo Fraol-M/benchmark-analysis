@@ -1411,6 +1411,7 @@ pln_canonicalized
 schema_alignment
 predicate_registry
 atomspace_added
+evidence_records
 ```
 
 For query, inspect:
@@ -1440,6 +1441,46 @@ The shortest way to diagnose accuracy is:
 6. Did query planning execute the intended target?
 ```
 
+## Evidence-Linked Retrieval
+
+The current storage model does not treat a whole extraction chunk as one proof
+target. SQLite stores four explicit identities:
+
+```text
+document_id -> evidence_id -> claim_id -> claim_evidence_id
+```
+
+`document_id` identifies the immutable source document. `evidence_id` identifies
+a chunk with exact document offsets. `claim_id` identifies normalized PLN.
+`claim_evidence_id` records why that claim is associated with that evidence.
+
+For a direct LangExtract claim, the source text must be an exact chunk substring.
+Its grounded arguments must occur in that evidence or in a validated
+coreference annotation. Explicitly negated claims also require explicit source
+negation. Failed checks produce `validation_state=quarantined`; the claim is not
+added to Atomspace or Qdrant.
+
+Normalizer-generated claims use `validation_state=derived`. They may be loaded
+into Atomspace when their deterministic transformation is traceable, but they
+are not independent Qdrant query targets and do not pretend to have an exact
+LangExtract span.
+
+Each accepted query target becomes a separate Qdrant point. Its dense and
+lexical vectors are generated from natural language (`retrieval_text`), while
+the linked PLN atom remains structured payload. Qdrant proposes the linked
+target; entity, predicate, arity, polarity, and question-intent gates decide
+whether it can be executed. PeTTaChainer still decides whether proof exists.
+
+SQLite also keeps an indexing outbox. If Ollama or Qdrant is unavailable during
+ingestion, the accepted claim remains durable and indexing can be retried. Use:
+
+```http
+POST /rebuild
+```
+
+to rebuild Atomspace and the v2 Qdrant collection from SQLite. Legacy
+chunk-level records are not trusted by the evidence-linked query planner.
+
 ## Final Mental Model
 
 Keep this model in your head:
@@ -1450,7 +1491,9 @@ Mention prepass safely explains those references to LangExtract.
 LangExtract turns language into candidate logic.
 The PLN translator rejects unsafe extraction shapes.
 The postprocessor normalizes and constrains logic.
+The evidence ledger validates and records exact claim lineage.
 Predicate mapping records vocabulary relationships conservatively.
+Qdrant retrieves source-linked candidate targets, never truth.
 The reasoner proves or does not prove the target.
 The answer generator reports only what the proof established.
 ```

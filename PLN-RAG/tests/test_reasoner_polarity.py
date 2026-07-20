@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -33,6 +34,34 @@ class ReasonerPolarityTests(unittest.TestCase):
 
         self.assertEqual("negative", outcome.status)
         self.assertEqual(["negative-proof"], outcome.negative_proof)
+
+    def test_add_statements_is_idempotent(self):
+        class FakeHandler:
+            def __init__(self):
+                self.atoms = []
+
+            def add_atom(self, atom):
+                self.atoms.append(atom)
+
+        with tempfile.TemporaryDirectory() as directory:
+            reasoner = Reasoner.__new__(Reasoner)
+            reasoner._atomspace_path = str(Path(directory) / "kb.metta")
+            reasoner._provenance_path = f"{reasoner._atomspace_path}.provenance.jsonl"
+            reasoner._lock = threading.Lock()
+            reasoner._handler = FakeHandler()
+            reasoner._atom_keys = set()
+            atom = "(: online (Online camera_2) (STV 1.0 1.0))"
+
+            first = reasoner.add_statements([atom])
+            second = reasoner.add_statements([atom])
+
+            self.assertEqual([atom], first)
+            self.assertEqual([], second)
+            self.assertEqual([atom], reasoner._handler.atoms)
+            self.assertEqual(
+                [atom],
+                Path(reasoner._atomspace_path).read_text(encoding="utf-8").splitlines(),
+            )
 
     def test_contradiction_is_reported_as_both(self):
         self.reasoner.query = lambda query, seed_terms=None: ["proof"]
